@@ -33,7 +33,7 @@ elseif solver == "snopt"
         p.x_ub,
         p.n_ceq,
         p.n_cineq;
-        print_level=5,
+        Major_print_level=1,
     )
 end
 
@@ -53,7 +53,7 @@ ax = Axis(
     fig[1, 1];
     xlabel="x₁",
     ylabel="x₂",
-    title="$(solver.capitalize()) path on Rosenbrock (log₁₀(f + ε))",
+    title="$(solver) path on Rosenbrock (log₁₀(f + ε))",
     aspect=DataAspect(),
 )
 hm = contourf!(ax, xs, ys, Z; levels=25, colormap=:viridis)
@@ -123,7 +123,7 @@ axislegend(ax; position=:lt)
 xlims!(ax, p.x_lb[1], p.x_ub[1])
 ylims!(ax, p.x_lb[2], p.x_ub[2])
 
-outfile = joinpath(@__DIR__, "$(solver)_rosenbrock_path.png")
+outfile = joinpath(@__DIR__, "rosenbrock_path_$(solver).png")
 save(outfile, fig)
 display(fig)
 println("saved ", outfile)
