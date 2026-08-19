@@ -3,8 +3,9 @@
 Nonlinear programming (NLP) interface for gradient-based solvers [SNOPT](https://ccom.ucsd.edu/~optimizers/docs/snopt/introduction.html) and [Ipopt](https://github.com/coin-or/ipopt) in Julia.
 
 Distinction from other similar libraries:
-- Unlike `JuMP`, `NLPInterface` is not a modeling language; instead, it expects a user-defined differentiable function that evaluates the objective and constraint(s).
-- It is similar to [`Snopt.jl`](https://github.com/byuflowlab/Snopt.jl); a distinction is 
+- Unlike `JuMP`, `NLPInterface` is *not* a modeling language; instead, it expects a user-defined differentiable function that evaluates the objective and constraint(s).
+- It is similar to [SNOW.jl](https://github.com/byuflowlab/SNOW.jl)/[`Snopt.jl`](https://github.com/byuflowlab/Snopt.jl); a distinction is that `Snopt.jl` `ccall`s SNOPT's Fortran entry points (`snopta_`, `sninit_`, ...) and builds SNOPT from Fortran sources, whereas `NLPInterface` `ccall`s the C wrappers (`f_snopta`, `f_snset`, ...) in a prebuilt `libsnopt7_cpp` / `libsnopt7_c` library (which still contains the Fortran solver). This choice lets users load the official prebuilt SNOPT libraries instead of compiling Fortran themselves, and Julia's C ABI is more portable than Fortran name mangling and string arguments.
+- It provides a common, easy to use interface wrapping [Ipopt.jl](https://juliapackages.com/p/ipopt)/the SNOPT C library.
 
 
 ## Overview
