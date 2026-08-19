@@ -29,3 +29,6 @@ JuliaLocalPreferences.toml
 
 # References for agent
 __references/
+
+# OSX temp file
+.DS_Store
