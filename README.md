@@ -1,5 +1,11 @@
 # NLPInterface.jl
 
+<p align="center">
+  <a href="https://github.com/Yuricst/NLPInterface.jl/actions/workflows/test.yml">
+    <img src="https://github.com/Yuricst/NLPInterface.jl/actions/workflows/test.yml/badge.svg" alt="test workflow"/>
+  </a>
+</p>
+
 Nonlinear programming (NLP) interface for gradient-based solvers [SNOPT](https://ccom.ucsd.edu/~optimizers/docs/snopt/introduction.html) and [Ipopt](https://github.com/coin-or/ipopt) in Julia.
 
 Distinction from other similar libraries:
