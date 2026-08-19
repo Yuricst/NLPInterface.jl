@@ -1,6 +1,11 @@
 # NLPInterface.jl
 
-Nonlinear programming (NLP) interface for gradient-based solvers SNOPT and IPOPT.
+Nonlinear programming (NLP) interface for gradient-based solvers [SNOPT](https://ccom.ucsd.edu/~optimizers/docs/snopt/introduction.html) and [Ipopt](https://github.com/coin-or/ipopt) in Julia.
+
+Distinction from other similar libraries:
+- Unlike `JuMP`, `NLPInterface` is not a modeling language; instead, it expects a user-defined differentiable function that evaluates the objective and constraint(s).
+- It is similar to [`Snopt.jl`](https://github.com/byuflowlab/Snopt.jl); a distinction is 
+
 
 ## Overview
 
@@ -72,9 +77,21 @@ function solve_ipopt(
 
 ## Installation
 
+To install, 
+
+```julia
+pkg> add /path/to/NLPInterface.jl
+```
+
+or 
+
+```
+pkg> add https://github.com/Yuricst/NLPInterface.jl.git
+```
+
 ### SNOPT setup
 
-SNOPT is proprietary. You need a licensed SNOPT 7 build whose architecture matches Julia (`Sys.ARCH`). Ipopt does not need this.
+[SNOPT](https://ccom.ucsd.edu/~optimizers/docs/snopt/introduction.html) is proprietary, so you need a license as well as SNOPT7 build whose architecture matches Julia (`Sys.ARCH`).
 
 #### License
 
@@ -138,6 +155,7 @@ function fitness(x)
     )
 end
 
+# Solve with IPOPT
 xopt, fopt, info = NLPInterface.solve_ipopt(
     fitness,
     x0,
@@ -145,8 +163,21 @@ xopt, fopt, info = NLPInterface.solve_ipopt(
     x_ub,
     n_ceq,
     n_cineq;
-    print_level = 3,
-    tol = 1e-6,
-    constr_viol_tol = 1e-8
+    print_level=3,
+    tol=1e-6,
+    constr_viol_tol=1e-8
+)
+
+# Solve with SNOPT
+xopt, fopt, info = NLPInterface.solve_snopt(
+    fitness,
+    x0,
+    x_lb,
+    x_ub,
+    n_ceq,
+    n_cineq;
+    Major_print_level=1,
+    Major_feasibility_tolerance=1e-8,
+    Major_optimality_tolerance=1e-6,
 )
 ```
