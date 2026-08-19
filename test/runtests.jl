@@ -35,7 +35,7 @@ include("problems.jl")
         if has_snopt()
             @testset "solve_snopt deriv=$deriv" for deriv in (:forwarddiff, :finitediff)
                 snopt_tols = if deriv === :forwarddiff
-                    (Major_feasibility_tolerance=1e-6, Major_optimality_tolerance=1e-6)
+                    (Major_feasibility_tolerance=1e-8, Major_optimality_tolerance=1e-6)
                 else
                     NamedTuple()
                 end
