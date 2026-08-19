@@ -70,12 +70,13 @@ function solve_ipopt(
 )
 ```
 
+## Installation
 
-## SNOPT setup
+### SNOPT setup
 
 SNOPT is proprietary. You need a licensed SNOPT 7 build whose architecture matches Julia (`Sys.ARCH`). Ipopt does not need this.
 
-### License
+#### License
 
 Point `SNOPT_LICENSE` at your license file (SNOPT reads this itself):
 
@@ -85,7 +86,7 @@ export SNOPT_LICENSE="$HOME/licenses/snopt7.lic"
 
 On Windows: `set SNOPT_LICENSE=C:\Users\me\snopt7.lic`. See [License Setup](https://ccom.ucsd.edu/~optimizers/docs/snopt/linking.html).
 
-### Shared library
+#### Shared library
 
 The package looks for a library that exports the C `f_*` wrappers (`f_snopta`, `f_snset`, ...), in this order:
 
@@ -115,3 +116,37 @@ NLPInterface.libsnopt7
 If `has_snopt()` is `false`, `solve_snopt` throws. Common failures: Julia is ARM64 but the library is x86_64 (or the reverse), or a C wrapper cannot find a sibling `libsnopt7` in the same directory. Keep the Fortran/C libraries together; the package will try to fix macOS install-name mismatches automatically.
 
 [Linking to the SNOPT library](https://ccom.ucsd.edu/~optimizers/docs/snopt/linking.html) has more detail on `libsnopt7` vs `libsnopt7_cpp`.
+
+
+## Quick start
+
+Here's a minimal example:
+
+```julia
+using NLPInterface
+
+x0 = [1.5, 1.5]
+x_lb = [-2.0, -2.0]
+x_ub = [2.0, 2.0]
+n_ceq = 1
+n_cineq = 1
+function fitness(x)
+    return (
+        x[1] + x[2],
+        [x[2] - x[1]^4 - 2x[1]^3 + 1.2x[1]^2 + 2x[1]],
+        [-x[2] - (4/3)*x[1] - 2/3],
+    )
+end
+
+xopt, fopt, info = NLPInterface.solve_ipopt(
+    fitness,
+    x0,
+    x_lb,
+    x_ub,
+    n_ceq,
+    n_cineq;
+    print_level = 3,
+    tol = 1e-6,
+    constr_viol_tol = 1e-8
+)
+```
