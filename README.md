@@ -80,7 +80,7 @@ function solve_ipopt(
 
 To install, 
 
-```julia
+```
 pkg> add /path/to/NLPInterface.jl
 ```
 
