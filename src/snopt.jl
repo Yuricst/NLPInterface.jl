@@ -265,7 +265,8 @@ function snopt_init_workspace!(printpath, summpath, cw, iw, rw)
             global libsnopt7_core = libsnopt7
         end
         iprint = Ref{Cint}(0)
-        isumm = Ref{Cint}(0)
+        # Unit 6 is Fortran stdout (SNOPT Summary file; see snInit / Major print level).
+        isumm = Ref{Cint}(_snopt_is_screen(summpath) ? 6 : 0)
         lencw = Ref{Cint}(div(length(cw), 8))
         leniw = Ref{Cint}(length(iw))
         lenrw = Ref{Cint}(length(rw))
@@ -379,17 +380,35 @@ function apply_snopt_option!(iw, leniw, rw, lenrw, key, val)
     return nothing
 end
 
-function snopt_output_files(printfile::AbstractString, summfile::AbstractString)
-    printpath = isempty(printfile) ? SNOPT_DEVNULL : String(printfile)
-    tempfiles = String[]
-    if isempty(summfile)
-        summpath, io = mktemp()
-        close(io)
-        push!(tempfiles, summpath)
-    else
-        summpath = String(summfile)
+function _snopt_is_screen(path::AbstractString)
+    s = lowercase(strip(String(path)))
+    return s == "screen" || s == "stdout" || s == "-"
+end
+
+function _snopt_console_summary(major_print_level, summfile::AbstractString)
+    isempty(summfile) || return _snopt_is_screen(summfile)
+    major_print_level === nothing && return false
+    if major_print_level isa Number
+        return major_print_level != 0
     end
-    return printpath, summpath, tempfiles
+    return true
+end
+
+function snopt_output_files(
+    printfile::AbstractString,
+    summfile::AbstractString;
+    console_summary::Bool=false,
+)
+    printpath = isempty(printfile) ? SNOPT_DEVNULL : String(printfile)
+    if !isempty(summfile)
+        summpath = String(summfile)
+    elseif console_summary
+        # snInitF / f_sninitx: "screen" routes the Summary file to stdout.
+        summpath = "screen"
+    else
+        summpath = SNOPT_DEVNULL
+    end
+    return printpath, summpath
 end
 
 function snopta_usrfun_trampoline(
@@ -442,8 +461,10 @@ Solve a constrained minimization problem with SNOPT.
 `fitness(x)` must return `(obj, ceq, cineq)` with `ceq == 0` and `cineq <= 0`.
 
 Keyword `deriv` selects derivatives (`:forwarddiff` default, or `:finitediff`).
-`Print_file` and `Summary_file` select SNOPT output files. All other keyword
-arguments are passed through as SNOPT options (underscores become spaces).
+`Print_file` and `Summary_file` select SNOPT output files. A nonzero
+`Major_print_level` with no `Summary_file` prints the SNOPT summary (major
+iteration log) to the console. All other keyword arguments are passed through
+as SNOPT options (underscores become spaces).
 
 Returns `(xopt, fopt, info)`.
 """
@@ -528,6 +549,7 @@ function solve_snopt(
 
     printfile = ""
     summfile = ""
+    major_print_level = nothing
     solver_kwargs = Pair{Any,Any}[]
     for (key, val) in kwargs
         keyword = snopt_option_keyword(key)
@@ -536,10 +558,15 @@ function solve_snopt(
         elseif keyword == "Summary file"
             summfile = string(val)
         else
+            keyword == "Major print level" && (major_print_level = val)
             push!(solver_kwargs, key => val)
         end
     end
-    printpath, summpath, tempfiles = snopt_output_files(printfile, summfile)
+    printpath, summpath = snopt_output_files(
+        printfile,
+        summfile;
+        console_summary=_snopt_console_summary(major_print_level, summfile),
+    )
 
     iw = zeros(Int32, 500 + 100 * (n + nF))
     rw = zeros(Float64, 500 + 200 * (n + nF))
@@ -684,12 +711,6 @@ function solve_snopt(
                     rw,
                     length(rw),
                 )
-            end
-            for path in tempfiles
-                try
-                    isfile(path) && rm(path; force=true)
-                catch
-                end
             end
         end
     end
