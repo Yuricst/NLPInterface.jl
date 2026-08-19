@@ -3,7 +3,7 @@ using NLPInterface
 
 include(joinpath(@__DIR__, "..", "test", "problems.jl"))
 
-solver = "ipopt"    # "snopt" or "ipopt"
+solver = "snopt"    # "snopt" or "ipopt"
 
 p = problems["crawling"]
 
@@ -136,7 +136,7 @@ axislegend(ax; position=:lt)
 xlims!(ax, p.x_lb[1], p.x_ub[1])
 ylims!(ax, p.x_lb[2], p.x_ub[2])
 
-outfile = joinpath(@__DIR__, "crawling_path_$(solver).png")
+outfile = joinpath(@__DIR__, "plots/crawling_path_$(solver).png")
 save(outfile, fig)
 display(fig)
 println("saved ", outfile)

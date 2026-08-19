@@ -123,7 +123,7 @@ axislegend(ax; position=:lt)
 xlims!(ax, p.x_lb[1], p.x_ub[1])
 ylims!(ax, p.x_lb[2], p.x_ub[2])
 
-outfile = joinpath(@__DIR__, "rosenbrock_path_$(solver).png")
+outfile = joinpath(@__DIR__, "plots/rosenbrock_path_$(solver).png")
 save(outfile, fig)
 display(fig)
 println("saved ", outfile)

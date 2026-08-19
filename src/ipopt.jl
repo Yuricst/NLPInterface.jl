@@ -1,3 +1,5 @@
+"""Interface for IPOPT"""
+
 # Ipopt return codes: https://coin-or.github.io/Ipopt/OUTPUT.html
 const IPOPT_RETURN_STATUS = Dict(
     0 => :Solve_Succeeded,
@@ -51,7 +53,7 @@ All other keyword arguments are passed through as Ipopt options.
 Returns `(xopt, fopt, info)`.
 """
 function solve_ipopt(
-    fitness,
+    fitness::Function,
     x0::AbstractVector,
     x_lb::AbstractVector,
     x_ub::AbstractVector,

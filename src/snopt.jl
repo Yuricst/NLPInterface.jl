@@ -1,3 +1,5 @@
+"""Interface for SNOPT7"""
+
 # SNOPT inform codes: https://ccom.ucsd.edu/~optimizers/docs/snopt/
 const SNOPT_RETURN_STATUS = Dict(
     1 => :Solve_Succeeded,
@@ -446,7 +448,7 @@ arguments are passed through as SNOPT options (underscores become spaces).
 Returns `(xopt, fopt, info)`.
 """
 function solve_snopt(
-    fitness,
+    fitness::Function,
     x0::AbstractVector,
     x_lb::AbstractVector,
     x_ub::AbstractVector,
