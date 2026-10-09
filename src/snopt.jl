@@ -287,6 +287,11 @@ function snopt_init_workspace!(printpath, summpath, cw, iw, rw)
     return nothing
 end
 
+"""
+    has_snopt() -> Bool
+
+Return `true` if a usable SNOPT shared library was loaded at startup.
+"""
 has_snopt() = !isempty(libsnopt7)
 
 function require_snopt()
