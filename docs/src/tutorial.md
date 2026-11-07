@@ -39,7 +39,7 @@ function fitness(x)
 end
 ```
 
-The lengths of `ceq` and `cineq` must match the counts passed to the solver on every evaluation, including evaluations with `ForwardDiff.Dual` elements. If a constraint block is absent, return an empty vector and pass `0` for that count.
+The lengths of `ceq` and `cineq` must match the counts passed to the solver on every evaluation, including evaluations with `ForwardDiff.Dual` elements. A mismatch throws a `DimensionMismatch` naming the block and both lengths. Earlier versions silently dropped extra constraints or copied a single value into several rows. If a constraint block is absent, return an empty vector (or `nothing`) and pass `0` for that count. A block with a count of `1` may also be returned as a scalar. Blocks may be vectors, tuples, or other arrays (read in column-major order); a block that is itself a string, character, or `missing` is rejected with an `ArgumentError`.
 
 The body has to be generic in the element type of `x`. ForwardDiff will call `fitness` with dual numbers. Code that only makes sense for plain floats, such as logging a path for a plot, should be guarded:
 
@@ -82,7 +82,7 @@ xopt, fopt, info = solve_ipopt(
 
 The return values are
 
-- `xopt`, a copy of the solution vector,
+- `xopt`, the solution vector (a new array; `x0` itself is never modified),
 - `fopt`, the objective at that point,
 - `info`, a symbol such as `:Solve_Succeeded` or `:Solved_To_Acceptable_Level`.
 
@@ -108,7 +108,7 @@ if has_snopt()
 end
 ```
 
-SNOPT option names use spaces. Underscores in the keyword are replaced with spaces, so `Major_print_level` is sent as `Major print level`. A nonzero `Major_print_level` with no `Summary_file` prints the major-iteration summary to the console. `Print_file` and `Summary_file` choose the print and summary output paths instead of being forwarded as ordinary options.
+SNOPT option names use spaces. Underscores in the keyword are replaced with spaces, so `Major_print_level` is sent as `Major print level`. A nonzero `Major_print_level` with no `Summary_file` prints the major-iteration summary to the console. `Print_file` and `Summary_file` choose the print and summary output paths instead of being forwarded as ordinary options. They must be different files. Two names for the same file (for example `p.out` and `./p.out`, or a path through a symlink) throw an `ArgumentError`, because SNOPT cannot open one file on two output units; on macOS and Windows, names differing only in case are treated as the same file. A path whose directory does not exist, or that names a directory, also throws `ArgumentError`. Paths are used literally: `~` is not expanded, trailing blanks are dropped, and leading blanks are kept. If SNOPT still cannot open a file (for example, no write permission), the solve returns `:Invalid_Problem_Definition`. Leave either option unset to write no file for it; `Summary_file = "screen"` sends the summary to the console. These two options need a library that exports `f_sninitx`. With an older library, file names are ignored with a warning, and only the console summary from `Major_print_level` is available.
 
 ## Derivatives
 
@@ -132,3 +132,7 @@ obj, ceq, cineq = fitness(xopt)
 ```
 
 A successful solve has `info` equal to `:Solve_Succeeded` or `:Solved_To_Acceptable_Level`, `ceq` near zero, and `cineq` entrywise at most zero. Other symbols report failure modes such as `:Infeasible_Problem_Detected` or `:Maximum_Iterations_Exceeded`. The full code maps are `NLPInterface.IPOPT_RETURN_STATUS` and `NLPInterface.SNOPT_RETURN_STATUS`.
+
+For SNOPT, `:Solved_To_Acceptable_Level` is INFO 3: the point is feasible, but optimality is only within a factor of 100 of `Major_optimality_tolerance`. `:Feasible_Point_Found` (INFO 2) appears only with the `Feasible point` option. SNOPT INFO 5 and 6 are reported as `:Elastic_Objective_Minimized` and `:Elastic_Infeasibilities_Minimized`. The SNOPT 7.7 manual lists them as normal endings of elastic mode, in which elastic constraints are allowed to violate their bounds, and does not promise the constraints hold. Evaluate `fitness(xopt)` and check `ceq` and `cineq` before using the point. Earlier versions reported these codes (and INFO 4, which `snOptA` is not expected to return) as `:Solved_To_Acceptable_Level`.
+
+Checking the constraints yourself is good practice for any status. Neither solver's status replaces looking at `ceq` and `cineq` at `xopt`.

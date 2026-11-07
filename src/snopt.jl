@@ -1,13 +1,21 @@
 """Interface for SNOPT7"""
 
-# SNOPT inform codes: https://ccom.ucsd.edu/~optimizers/docs/snopt/
+# SNOPT inform codes: SNOPT 7.7 User's Guide, Section 8.6
+# (https://ccom.ucsd.edu/~optimizers/docs/snopt/).
+# Codes 1-3 return a feasible point (2: only with the `Feasible point` option;
+# 3: feasible, but within 1e-2 of the requested optimality tolerance).
+# The manual lists 5 and 6 as normal endings of elastic mode, where elastic
+# constraints may be violated, and does not state the constraints hold, so they
+# get their own symbols instead of `:Solved_To_Acceptable_Level`. Code 4 (weak QP
+# minimizer) is not in the snOptA list and is not expected; it is mapped for
+# completeness.
 const SNOPT_RETURN_STATUS = Dict(
     1 => :Solve_Succeeded,
     2 => :Feasible_Point_Found,
     3 => :Solved_To_Acceptable_Level,
-    4 => :Solved_To_Acceptable_Level,
-    5 => :Solved_To_Acceptable_Level,
-    6 => :Solved_To_Acceptable_Level,
+    4 => :Weak_QP_Minimizer,
+    5 => :Elastic_Objective_Minimized,
+    6 => :Elastic_Infeasibilities_Minimized,
     11 => :Infeasible_Problem_Detected,
     12 => :Infeasible_Problem_Detected,
     13 => :Infeasible_Problem_Detected,
@@ -56,7 +64,6 @@ const SNOPT_REQUIRED_SYMBOLS = (
     :f_snopta,
 )
 const SNOPT_LOCK = ReentrantLock()
-const SNOPT_DEVNULL = Sys.iswindows() ? "NUL" : "/dev/null"
 const SNOPT_TEMPDIRS = String[]
 const SNOPT_OPEN_HANDLES = Ptr{Cvoid}[]
 
@@ -404,16 +411,94 @@ function snopt_output_files(
     summfile::AbstractString;
     console_summary::Bool=false,
 )
-    printpath = isempty(printfile) ? SNOPT_DEVNULL : String(printfile)
+    # An empty name means "no file": f_sninitx then leaves that unit closed.
+    # Do not substitute /dev/null here. Opening the same path on both the Print
+    # and Summary units makes the Fortran OPEN fail, f_snopta then returns
+    # INFO 91 without evaluating anything, and the failed open can leave later
+    # solves in the same process failing too.
+    printpath = String(printfile)
     if !isempty(summfile)
         summpath = String(summfile)
     elseif console_summary
         # snInitF / f_sninitx: "screen" routes the Summary file to stdout.
         summpath = "screen"
     else
-        summpath = SNOPT_DEVNULL
+        summpath = ""
     end
     return printpath, summpath
+end
+
+# SNOPT (Fortran) trims trailing blanks from file names but keeps leading ones,
+# so all comparisons below use `rstrip`, never `strip`.
+_snopt_trim(path::AbstractString) = rstrip(String(path))
+
+# f_sninitx treats only the exact word "screen" (after trimming) as the console.
+_snopt_is_console_name(path::AbstractString) = _snopt_trim(path) == "screen"
+
+# Normalized key for comparing output file names: absolute path with the
+# directory resolved through symlinks when it exists. Errs on the side of calling
+# two names the same: case is folded on macOS/Windows, whose file systems are
+# case-insensitive by default.
+function _snopt_file_key(path::AbstractString)
+    p = abspath(_snopt_trim(path))
+    dir, base = dirname(p), basename(p)
+    if isdir(dir)
+        dir = try
+            realpath(dir)
+        catch
+            dir
+        end
+    end
+    key = joinpath(dir, base)
+    return (Sys.isapple() || Sys.iswindows()) ? lowercase(key) : key
+end
+
+function _snopt_same_output_file(a::AbstractString, b::AbstractString)
+    a_, b_ = _snopt_trim(a), _snopt_trim(b)
+    (isempty(a_) || isempty(b_)) && return false
+    (_snopt_is_console_name(a_) || _snopt_is_console_name(b_)) && return false
+    _snopt_file_key(a_) == _snopt_file_key(b_) && return true
+    # Different names for one existing file (file symlinks, hard links).
+    return try
+        ispath(a_) && ispath(b_) && samefile(a_, b_)
+    catch
+        false
+    end
+end
+
+# Opening one file on both the Print and Summary units makes the Fortran OPEN
+# fail; SNOPT then returns INFO 91 without solving, and the unit is left
+# half-open so every later solve that names that file fails the same way until
+# Julia restarts. Reject such pairs before SNOPT sees them. Also reject paths that
+# cannot be opened for an obvious reason (missing directory, path is a
+# directory): SNOPT would silently return INFO 91 for those. Other OPEN failures,
+# such as a directory without write permission, still surface only as
+# `:Invalid_Problem_Definition`.
+function check_snopt_output_files(printpath::AbstractString, summpath::AbstractString)
+    for (opt, p) in (("Print_file", printpath), ("Summary_file", summpath))
+        p_ = _snopt_trim(p)
+        (isempty(p_) || _snopt_is_console_name(p_)) && continue
+        full = abspath(p_)
+        dir = dirname(full)
+        isdir(dir) || throw(
+            ArgumentError(
+                "$opt directory does not exist: $(repr(dir)) " *
+                "(paths are used literally; `~` is not expanded)",
+            ),
+        )
+        isdir(full) && throw(ArgumentError("$opt names a directory, not a file: $(repr(full))"))
+    end
+    if _snopt_same_output_file(printpath, summpath)
+        throw(
+            ArgumentError(
+                "Print_file and Summary_file refer to the same file " *
+                "($(repr(printpath)) and $(repr(summpath))); SNOPT cannot open " *
+                "one file on two output units. Use two different files " *
+                "(on macOS/Windows, names differing only in case count as the same).",
+            ),
+        )
+    end
+    return nothing
 end
 
 function snopta_usrfun_trampoline(
@@ -471,7 +556,19 @@ Keyword `deriv` selects derivatives (`:forwarddiff` default, or `:finitediff`).
 iteration log) to the console. All other keyword arguments are passed through
 as SNOPT options (underscores become spaces).
 
-Returns `(xopt, fopt, info)`.
+The lengths of `ceq` and `cineq` must equal `n_ceq` and `n_cineq` at every
+evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
+
+`Print_file` and `Summary_file` must name different files; two names for one
+file throw an `ArgumentError`.
+
+Returns `(xopt, fopt, info)`. `info` is a symbol from
+`NLPInterface.SNOPT_RETURN_STATUS`. `:Solve_Succeeded`,
+`:Solved_To_Acceptable_Level`, and `:Feasible_Point_Found` (only with the
+`Feasible point` option) mean SNOPT returned a feasible point.
+`:Elastic_Objective_Minimized` and `:Elastic_Infeasibilities_Minimized` end the
+run normally in elastic mode, where the manual does not promise the constraints
+hold, so check them before using `xopt`.
 """
 function solve_snopt(
     fitness::Function,
@@ -498,7 +595,9 @@ function solve_snopt(
         throw(ArgumentError("Unknown deriv=$deriv; use :forwarddiff or :finitediff"))
     end
 
-    x = convert(Vector{Float64}, x0)
+    # Always a fresh array: SNOPT writes the solution into `x` in place, and
+    # `convert` would return the caller's `x0` itself when it is a Vector{Float64}.
+    x = Vector{Float64}(x0)
     xlow = snopt_bound.(x_lb)
     xupp = snopt_bound.(x_ub)
     nF = 1 + Int(n_ceq) + Int(n_cineq)
@@ -572,6 +671,12 @@ function solve_snopt(
         summfile;
         console_summary=_snopt_console_summary(major_print_level, summfile),
     )
+    if libsnopt7_has_sninitx
+        check_snopt_output_files(printpath, summpath)
+    elseif any(p -> !isempty(strip(p)) && !_snopt_is_screen(p), (printpath, summpath))
+        @warn "This SNOPT library has no f_sninitx; Print_file and Summary_file " *
+              "names are ignored (only a console summary is available)." maxlog = 1
+    end
 
     iw = zeros(Int32, 500 + 100 * (n + nF))
     rw = zeros(Float64, 500 + 200 * (n + nF))

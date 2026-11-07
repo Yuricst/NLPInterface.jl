@@ -50,7 +50,11 @@ Solve a constrained minimization problem with Ipopt.
 Keyword `deriv` selects derivatives (`:forwarddiff` default, or `:finitediff`).
 All other keyword arguments are passed through as Ipopt options.
 
-Returns `(xopt, fopt, info)`.
+The lengths of `ceq` and `cineq` must equal `n_ceq` and `n_cineq` at every
+evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
+
+Returns `(xopt, fopt, info)`. `info` is a symbol from
+`NLPInterface.IPOPT_RETURN_STATUS`.
 """
 function solve_ipopt(
     fitness::Function,
