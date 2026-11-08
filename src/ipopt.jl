@@ -53,6 +53,9 @@ All other keyword arguments are passed through as Ipopt options.
 The lengths of `ceq` and `cineq` must equal `n_ceq` and `n_cineq` at every
 evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
 
+`fitness` must not keep a reference to `x`: the array is reused between calls
+(copy it to keep it).
+
 Returns `(xopt, fopt, info)`. `info` is a symbol from
 `NLPInterface.IPOPT_RETURN_STATUS`.
 """
@@ -84,28 +87,47 @@ function solve_ipopt(
     g_L = vcat(zeros(Float64, n_ceq), fill(-Inf, n_cineq))
     g_U = zeros(Float64, m)
 
-    # Cache last evaluation so Ipopt's split callbacks do not recompute 4x.
-    xlast = fill(NaN, n)
+    # Ipopt asks for f, g, grad f and the Jacobian of g in separate callbacks.
+    # Cache the residual and its Jacobian separately, each keyed on the `x` it was
+    # computed at, so that trial points that only need f or g (line search) do
+    # not pay for a Jacobian, and no point is evaluated twice.
+    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv)
+    x_r = zeros(Float64, n)
+    x_J = zeros(Float64, n)
+    r_valid = Ref(false)
+    J_valid = Ref(false)
     r_cache = zeros(Float64, 1 + m)
     J_cache = zeros(Float64, 1 + m, n)
 
-    function update_cache!(x)
-        if isequal(x, xlast)
-            return
-        end
-        r_cache .= packed_residual(fitness, x, n_ceq, n_cineq)
-        J_cache .= jacobian_residual(fitness, x, n_ceq, n_cineq, deriv)
-        xlast .= x
+    function update_value!(x)
+        r_valid[] && isequal(x, x_r) && return
+        r_valid[] = false  # stays invalid if `fitness` throws
+        residual_value!(evaluator, r_cache, x)
+        x_r .= x
+        r_valid[] = true
+        return
+    end
+
+    function update_jacobian!(x)
+        J_valid[] && isequal(x, x_J) && return
+        have_r = r_valid[] && isequal(x, x_r)
+        J_valid[] = false
+        have_r || (r_valid[] = false)
+        residual_value_and_jacobian!(evaluator, r_cache, J_cache, x, have_r)
+        x_r .= x
+        x_J .= x
+        r_valid[] = true
+        J_valid[] = true
         return
     end
 
     function eval_f(x)
-        update_cache!(x)
+        update_value!(x)
         return r_cache[1]
     end
 
     function eval_g(x, g)
-        update_cache!(x)
+        update_value!(x)
         if m > 0
             g .= view(r_cache, 2:(1 + m))
         end
@@ -113,7 +135,7 @@ function solve_ipopt(
     end
 
     function eval_grad_f(x, grad_f)
-        update_cache!(x)
+        update_jacobian!(x)
         grad_f .= view(J_cache, 1, :)
         return
     end
@@ -130,7 +152,7 @@ function solve_ipopt(
                 end
             end
         else
-            update_cache!(x)
+            update_jacobian!(x)
             k = 1
             for i in 1:m
                 for j in 1:n

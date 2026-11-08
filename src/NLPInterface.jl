@@ -1,5 +1,6 @@
 module NLPInterface
 
+using DiffResults
 using FiniteDiff
 using ForwardDiff
 using Ipopt

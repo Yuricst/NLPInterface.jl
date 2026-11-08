@@ -110,12 +110,20 @@ end
 
 SNOPT option names use spaces. Underscores in the keyword are replaced with spaces, so `Major_print_level` is sent as `Major print level`. A nonzero `Major_print_level` with no `Summary_file` prints the major-iteration summary to the console. `Print_file` and `Summary_file` choose the print and summary output paths instead of being forwarded as ordinary options. They must be different files. Two names for the same file (for example `p.out` and `./p.out`, or a path through a symlink) throw an `ArgumentError`, because SNOPT cannot open one file on two output units; on macOS and Windows, names differing only in case are treated as the same file. A path whose directory does not exist, or that names a directory, also throws `ArgumentError`. Paths are used literally: `~` is not expanded, trailing blanks are dropped, and leading blanks are kept. If SNOPT still cannot open a file (for example, no write permission), the solve returns `:Invalid_Problem_Definition`. Leave either option unset to write no file for it; `Summary_file = "screen"` sends the summary to the console. These two options need a library that exports `f_sninitx`. With an older library, file names are ignored with a warning, and only the console summary from `Major_print_level` is available.
 
+If `fitness` throws a `DomainError` (for example `sqrt` of a negative number at a line-search trial point), SNOPT treats the functions as undefined there and shortens the step. The error is not rethrown. If SNOPT cannot recover, it ends with a failure status, usually `:User_Supplied_Function_Undefined`, and the last `DomainError` is shown in a warning. With `deriv = :finitediff`, a perturbed point used for the Jacobian also counts, so a `DomainError` just outside a bound can stop the solve. Any other exception, including `InterruptException` (Ctrl-C) and a `DomainError` wrapped in another exception (such as a `TaskFailedException`), stops SNOPT immediately and is rethrown by `solve_snopt`. If no evaluation of `fitness` requested by SNOPT completed, `fopt` is `NaN`.
+
+Only one SNOPT solve runs at a time. Calling `solve_snopt` from inside a `fitness` passed to `solve_snopt` throws an error, because SNOPT's C interface keeps global state; on Julia 1.11 and later this also covers tasks spawned from `fitness` while the solve runs. Handing the call to a task that already existed before the solve deadlocks. Use `solve_ipopt` for an inner problem instead.
+
 ## Derivatives
 
 `deriv` selects how the Jacobian of `[obj; ceq; cineq]` is built.
 
 - `:forwarddiff` (default) uses ForwardDiff. This is the right choice when `fitness` is written generically.
 - `:finitediff` uses finite differences and only evaluates `fitness` on `Float64` vectors.
+
+With `:forwarddiff`, the value and the Jacobian at a point come from the same Dual evaluation. With `:finitediff` (forward differences), a Jacobian costs `n` extra calls, reusing the value at the base point. Ipopt computes a Jacobian only where it asks for one, so line-search trial points cost a single `fitness` call.
+
+Both solvers reuse the array passed to `fitness` between calls. Do not keep a reference to `x` inside `fitness`; copy it if you need it later.
 
 ```julia
 xopt, fopt, info = solve_ipopt(

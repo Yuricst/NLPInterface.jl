@@ -1,4 +1,5 @@
 using NLPInterface
+using ForwardDiff
 using Test
 
 include("problems.jl")
@@ -157,6 +158,170 @@ include("problems.jl")
                 @test filesize(pf) > 0
                 @test filesize(sf) > 0
             end
+        end
+    end
+
+    @testset "fitness evaluation counts" begin
+        # Wrap `fitness` to record every point it is called at, split into plain
+        # (Float64) and Dual (ForwardDiff) calls.
+        function counted(f)
+            plain = Vector{Vector{Float64}}()
+            dual = Vector{Vector{Float64}}()
+            g = function (x)
+                if eltype(x) <: ForwardDiff.Dual
+                    push!(dual, ForwardDiff.value.(x))
+                else
+                    push!(plain, collect(Float64, x))
+                end
+                return f(x)
+            end
+            return g, plain, dual
+        end
+        p = problems["rosenbrock"]
+        n = length(p.x0)
+
+        # ResidualEvaluator: value and Jacobian in one pass.
+        x = [0.3, 0.4]
+        J_ref = NLPInterface.jacobian_residual(p.fitness, x, p.n_ceq, p.n_cineq, :forwarddiff)
+        r_ref = NLPInterface.packed_residual(p.fitness, x, p.n_ceq, p.n_cineq)
+        for deriv in (:forwarddiff, :finitediff), r_valid in (false, true)
+            g, plain, dual = counted(p.fitness)
+            ev = NLPInterface.ResidualEvaluator(g, n, p.n_ceq, p.n_cineq, deriv)
+            r = r_valid ? copy(r_ref) : fill(NaN, length(r_ref))
+            J = fill(NaN, size(J_ref))
+            NLPInterface.residual_value_and_jacobian!(ev, r, J, x, r_valid)
+            @test r == r_ref
+            @test J ≈ J_ref rtol = (deriv === :forwarddiff ? 1e-12 : 1e-6)
+            if deriv === :forwarddiff
+                @test isempty(plain)   # the value comes from the Dual pass
+                @test length(dual) == 1
+            else
+                @test length(plain) == n + !r_valid
+                @test isempty(dual)
+            end
+        end
+
+        # Ipopt: no point is evaluated twice in the same mode, and trial points
+        # that only need f or g do not get a Jacobian.
+        for deriv in (:forwarddiff, :finitediff)
+            g, plain, dual = counted(p.fitness)
+            xopt, _, info = solve_ipopt(g, p.x0, p.x_lb, p.x_ub, p.n_ceq, p.n_cineq;
+                                        deriv=deriv, print_level=0)
+            @test info === :Solve_Succeeded
+            @test allunique(plain)
+            @test allunique(dual)
+            if deriv === :forwarddiff
+                @test length(dual) < length(plain)
+            end
+        end
+
+        if has_snopt()
+            # SNOPT with ForwardDiff: no plain call at points that get a Jacobian.
+            g, plain, dual = counted(p.fitness)
+            _, _, info = solve_snopt(g, p.x0, p.x_lb, p.x_ub, p.n_ceq, p.n_cineq)
+            @test info === :Solve_Succeeded
+            @test isempty(intersect(plain, dual))
+        end
+    end
+
+    if has_snopt()
+        @testset "SNOPT exceptions in fitness" begin
+            p = problems["rosenbrock"]
+            args = (p.x0, p.x_lb, p.x_ub, p.n_ceq, p.n_cineq)
+
+            # A transient DomainError: SNOPT shortens the step and converges, and
+            # the error is not rethrown afterwards.
+            for deriv in (:forwarddiff, :finitediff)
+                ncalls = Ref(0)
+                f = function (x)
+                    ncalls[] += 1
+                    ncalls[] == 5 && throw(DomainError(x, "transient"))
+                    return p.fitness(x)
+                end
+                xopt, fopt, info = solve_snopt(f, args...; deriv=deriv)
+                @test ncalls[] > 5
+                @test info === :Solve_Succeeded
+                @test xopt ≈ p.xopt atol = 1e-4
+                @test fopt ≈ p.fopt atol = 1e-5
+            end
+
+            # DomainError at x0: SNOPT gives up, fopt is NaN (not the initial 0.0).
+            xopt, fopt, info = @test_logs (:warn, r"undefined") match_mode = :any solve_snopt(
+                x -> throw(DomainError(x)), args...,
+            )
+            @test info === :User_Supplied_Function_Undefined
+            @test isnan(fopt)
+            @test xopt == p.x0
+
+            # Any other error (and Ctrl-C) stops SNOPT at once and is rethrown.
+            for err in (ErrorException("boom"), InterruptException(), ArgumentError("bad"))
+                ncalls = Ref(0)
+                nafter = Ref(0)
+                f = function (x)
+                    ncalls[] += 1
+                    ncalls[] > 5 && (nafter[] += 1)
+                    ncalls[] == 5 && throw(err)
+                    return p.fitness(x)
+                end
+                @test_throws typeof(err) solve_snopt(f, args...; deriv=:finitediff)
+                @test nafter[] == 0
+            end
+
+            # Later solves are unaffected.
+            xopt, fopt, info = solve_snopt(p.fitness, args...)
+            @test info === :Solve_Succeeded
+            @test fopt ≈ p.fopt atol = 1e-5
+        end
+
+        @testset "nested solve_snopt" begin
+            inner_args = ([0.0, 0.0], [-10.0, -10.0], [10.0, 10.0], 0, 0)
+            inner = x -> ((x[1] - 2)^2 + (x[2] - 3)^2, nothing, nothing)
+            # Calling solve_snopt from fitness used to clear the outer callback,
+            # so the outer solve silently returned garbage. It now throws.
+            outer = function (x)
+                solve_snopt(inner, inner_args...)
+                return inner(x)
+            end
+            err = try
+                solve_snopt(outer, inner_args...)
+                nothing
+            catch e
+                e
+            end
+            @test err isa ErrorException
+            @test occursin("nested", sprint(showerror, err))
+
+            if isdefined(Base, :ScopedValues)
+                # From a task spawned in fitness: used to deadlock on the lock.
+                outer_spawn = function (x)
+                    fetch(Threads.@spawn solve_snopt(inner, inner_args...))
+                    return inner(x)
+                end
+                @test_throws TaskFailedException solve_snopt(outer_spawn, inner_args...)
+
+                # A task spawned in fitness that runs after the solve has ended
+                # is not nested and may solve.
+                go = Channel{Nothing}(1)
+                worker = Ref{Task}()
+                outer_worker = function (x)
+                    if !isassigned(worker)
+                        worker[] = Threads.@spawn (take!(go); solve_snopt(inner, inner_args...))
+                    end
+                    return inner(x)
+                end
+                _, _, info = solve_snopt(outer_worker, inner_args...)
+                @test info === :Solve_Succeeded
+                put!(go, nothing)
+                xw, _, infow = fetch(worker[])
+                @test infow === :Solve_Succeeded
+                @test xw ≈ [2.0, 3.0] atol = 1e-6
+            end
+
+            # Neither leaves global state behind.
+            xopt, fopt, info = solve_snopt(inner, inner_args...)
+            @test info === :Solve_Succeeded
+            @test xopt ≈ [2.0, 3.0] atol = 1e-6
+            @test fopt ≈ 0.0 atol = 1e-10
         end
     end
 
