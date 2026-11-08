@@ -4,7 +4,9 @@ CurrentModule = NLPInterface
 
 # API
 
-Both solvers minimize `fitness(x) -> (obj, ceq, cineq)` subject to `ceq == 0`, `cineq <= 0`, and box bounds. They return `(xopt, fopt, info)`.
+Both solvers minimize `fitness(x) -> (obj, ceq, cineq)` subject to `ceq == 0`, `cineq <= 0`, and box bounds. They return `(xopt, fopt, info)`. `xopt` is a new array; the caller's `x0` is not modified.
+
+`ceq` and `cineq` must have exactly `n_ceq` and `n_cineq` entries at every evaluation. A mismatch throws `DimensionMismatch`.
 
 `deriv` is `:forwarddiff` or `:finitediff`. Every other keyword is a solver option. Ipopt keywords are stringified as written (`tol` → `tol`). SNOPT keywords turn underscores into spaces (`Major_print_level` → `Major print level`).
 

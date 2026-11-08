@@ -37,6 +37,8 @@ function fitness(x)
 end
 ```
 
+`ceq` and `cineq` must have exactly `n_ceq` and `n_cineq` entries (passed to the solver below) on every call; otherwise a `DimensionMismatch` is thrown. The initial guess `x0` is never modified by either solver.
+
 The interface implements the interface
 
 ```julia
