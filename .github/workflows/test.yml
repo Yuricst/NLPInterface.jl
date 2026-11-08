@@ -14,15 +14,23 @@ permissions:
 
 jobs:
   test:
+    name: Julia ${{ matrix.julia-version }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        julia-version: ['lts'] # '1', 'pre']
-        julia-arch: [x64] #[x64, x86]
+        julia-version: ['lts']
+        julia-arch: [x64]
         os: [macOS-latest, ubuntu-latest, windows-latest]
-        # exclude:
-        #   - os: macOS-latest
-        #     julia-arch: x86
+        include:
+          - julia-version: '1'
+            julia-arch: x64
+            os: ubuntu-latest
+    env:
+      # The SNOPT ccall plumbing is tested against a mock library built from
+      # test/mock_snopt with the runner's C compiler. Require it where a
+      # compiler is known to exist; on Windows it is best effort.
+      NLPINTERFACE_REQUIRE_MOCK_SNOPT: ${{ matrix.os != 'windows-latest' && '1' || '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -33,5 +41,21 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
-        # with:
-        #   annotate: true
+
+  # Test with the oldest versions allowed by [compat], so the lower bounds stay
+  # honest (the Ipopt wrapper relies on Ipopt.jl's low-level C API).
+  downgrade:
+    name: Julia lts - ubuntu-latest - minimum dependency versions
+    runs-on: ubuntu-latest
+    env:
+      NLPINTERFACE_REQUIRE_MOCK_SNOPT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'lts'
+      - uses: julia-actions/julia-downgrade-compat@v1
+        with:
+          skip: Libdl,Test
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1

@@ -3,20 +3,44 @@ Functions to turn the `(obj, ceq, cineq) -> r` into a single stacked vector `r`.
 """
 
 block_length(::Nothing) = 0
-block_length(block::Union{Number,AbstractArray,Tuple}) = length(block)
-function block_length(block::Union{AbstractString,AbstractChar,Missing})
+block_length(block::Real) = 1
+block_length(block::Union{AbstractArray,Tuple}) = length(block)
+
+# Accept other iterables (generators, ...) and reject everything that is not a
+# collection of real numbers: strings, characters, symbols, `missing`, `Some`,
+# complex numbers, and sets or dictionaries (no defined order, so rows would be
+# assigned arbitrarily). This happens before `convert` or `length` would fail
+# with a less helpful error. An iterable without a known size (a generator over
+# a filter, whose `length` throws) is collected first, so it is iterated once.
+normalize_block(block::Union{Nothing,Real,AbstractArray,Tuple}) = block
+function normalize_block(block)
+    if !(block isa Union{AbstractString,AbstractChar,Number,Missing,Symbol,Some,AbstractSet,AbstractDict}) &&
+       applicable(iterate, block)
+        size = Base.IteratorSize(block)
+        return size isa Union{Base.HasLength,Base.HasShape} ? block : collect(block)
+    end
     throw(
         ArgumentError(
-            "constraint block must be a vector, tuple, number, or nothing; got $(typeof(block))",
+            "constraint block must be a vector, tuple, real number, or nothing; " *
+            "got $(typeof(block))",
         ),
     )
 end
-block_length(block) = length(block)  # other iterables with a known length
+block_length(block) = length(block)
+
+function bad_constraint_value(v, name)
+    return ArgumentError(
+        "fitness returned a $(typeof(v)) entry in $name; constraint values must be real numbers",
+    )
+end
 
 # Copy one constraint block into `r[offset:(offset + n - 1)]`, after checking that
 # the block has exactly `n` entries. A length mismatch would otherwise either drop
-# constraints silently or broadcast one value into several rows.
+# constraints silently or broadcast one value into several rows. Each entry must
+# be a real number: characters (`['a']`) would otherwise be stored as their
+# character codes, and `missing` would fail inside `convert`.
 function store_constraint_block!(r, offset, block, n, name)
+    block = normalize_block(block)
     len = block_length(block)
     if len != n
         got = block === nothing ? "nothing" : "$len value(s)"
@@ -27,13 +51,14 @@ function store_constraint_block!(r, offset, block, n, name)
         )
     end
     n == 0 && return r
-    if block isa Number
+    if block isa Real
         r[offset] = block
-    elseif block isa AbstractArray
+    elseif block isa AbstractArray{<:Real}
         copyto!(r, offset, block, firstindex(block), n)
     else
         k = offset
         for v in block
+            v isa Real || throw(bad_constraint_value(v, name))
             r[k] = v
             k += 1
         end
@@ -50,10 +75,15 @@ Evaluate `fitness(x) -> (obj, ceq, cineq)` as a single vector
 Throws a `DimensionMismatch` if `ceq` does not have exactly `n_ceq` entries or
 `cineq` does not have exactly `n_cineq` entries. A block with zero entries may
 be returned as an empty collection or as `nothing`; a block with one entry may
-be a scalar.
+be a real scalar. The objective and every constraint entry must be real
+numbers; anything else (strings, characters, `missing`, symbols, ...) throws an
+`ArgumentError`.
 """
 function packed_residual(fitness, x, n_ceq, n_cineq)
     obj, ceq, cineq = fitness(x)
+    obj isa Real || throw(
+        ArgumentError("fitness must return a real scalar objective; got $(typeof(obj))"),
+    )
     T = eltype(x)
     r = Vector{T}(undef, 1 + n_ceq + n_cineq)
     r[1] = obj

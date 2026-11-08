@@ -8,6 +8,7 @@ using Libdl
 
 export solve_ipopt, solve_snopt, has_snopt
 
+include("validation.jl")
 include("residuals.jl")
 include("ipopt.jl")
 include("snopt.jl")
