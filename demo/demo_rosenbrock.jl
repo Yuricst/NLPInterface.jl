@@ -1,4 +1,5 @@
 using CairoMakie
+using ForwardDiff
 using NLPInterface
 
 include(joinpath(@__DIR__, "..", "test", "problems.jl"))
@@ -9,8 +10,11 @@ p = problems["rosenbrock"]
 
 path = Vector{Vector{Float64}}()
 function fitness_logged(x)
-    if eltype(x) <: Float64
-        push!(path, collect(Float64, x))
+    # With deriv=:forwarddiff most calls carry Dual numbers; log their primal value.
+    # Skip repeats: one Jacobian may call fitness several times at the same point.
+    xv = ForwardDiff.value.(x)
+    if isempty(path) || xv != path[end]
+        push!(path, collect(Float64, xv))
     end
     return p.fitness(x)
 end
