@@ -1,5 +1,5 @@
 # Tests of the SNOPT ccall plumbing against the mock library in this directory.
-# test/runtests.jl builds the mock and runs this file in a separate Julia
+# test/test_mock_snopt.jl builds the mock and runs this file in a separate Julia
 # process, with SNOPT_LIB pointing at the mock wrapper and the variant
 # ("sninitx" or "fallback") as the only argument. The mock does not implement
 # SNOPT (see mock_wrapper.c), so the problems here are box-constrained convex
