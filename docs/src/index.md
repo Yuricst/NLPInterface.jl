@@ -77,4 +77,4 @@ using NLPInterface
 has_snopt()
 ```
 
-[`has_snopt`](@ref) is `false` when no usable library was loaded, and [`solve_snopt`](@ref) throws in that case. The Julia architecture must match the library (`Sys.ARCH`). Keep the C wrapper and its companion `libsnopt7` in the same directory.
+[`has_snopt`](@ref) is `false` when no usable library was loaded, and [`solve_snopt`](@ref) throws in that case. The Julia architecture must match the library (`Sys.ARCH`). Keep the C wrapper and its companion `libsnopt7` in the same directory. On macOS, if the wrapper's install name for `libsnopt7` points to a missing file, a patched copy is made once and cached in the package's scratch space (`~/.julia/scratchspaces/e604ab98-cb68-4d52-a41a-b2fbd5dba595/snopt_relocated`).

@@ -145,7 +145,7 @@ has_snopt()          # true if a usable library was loaded
 NLPInterface.libsnopt7
 ```
 
-If `has_snopt()` is `false`, `solve_snopt` throws. Common failures: Julia is ARM64 but the library is x86_64 (or the reverse), or a C wrapper cannot find a sibling `libsnopt7` in the same directory. Keep the Fortran/C libraries together; the package will try to fix macOS install-name mismatches automatically.
+If `has_snopt()` is `false`, `solve_snopt` throws. Common failures: Julia is ARM64 but the library is x86_64 (or the reverse), or a C wrapper cannot find a sibling `libsnopt7` in the same directory. Keep the Fortran/C libraries together. On macOS, a wrapper whose `libsnopt7` install name points to a missing file is fixed automatically: a patched, re-signed copy is made once and cached under `~/.julia/scratchspaces/e604ab98-cb68-4d52-a41a-b2fbd5dba595/snopt_relocated` (delete that directory to force a rebuild).
 
 [Linking to the SNOPT library](https://ccom.ucsd.edu/~optimizers/docs/snopt/linking.html) has more detail on `libsnopt7` vs `libsnopt7_cpp`.
 

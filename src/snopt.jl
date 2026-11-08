@@ -64,8 +64,17 @@ const SNOPT_REQUIRED_SYMBOLS = (
     :f_snopta,
 )
 const SNOPT_LOCK = ReentrantLock()
+# A solve that waits this long for `SNOPT_LOCK` warns about a possible deadlock.
+const SNOPT_LOCK_WAIT_WARN_SECONDS = Ref(60.0)
 const SNOPT_TEMPDIRS = String[]
 const SNOPT_OPEN_HANDLES = Ptr{Cvoid}[]
+# Fortran units used for the Print and Summary files on the `sninit_` fallback
+# path (libraries without `f_sninitx`). Unit 6 is standard output.
+const SNOPT_FALLBACK_PRINT_UNIT = Cint(9)
+const SNOPT_FALLBACK_SUMMARY_UNIT = Cint(10)
+const SNOPT_CONSOLE_UNIT = Cint(6)
+# `f_snmema` INFO when the workspace estimate succeeded (snMemA, SNOPT 7.7).
+const SNOPT_MEMA_OK = 104
 
 # Resolved at runtime in `__init__`; ccall re-reads this global on each call.
 libsnopt7 = ""
@@ -78,6 +87,7 @@ libsnopt7_has_sninitx = false
 # (`SNOPT_LOCK`) and nested solves are rejected (`_snopt_in_solve`).
 const _SNOPT_USRFUN = Ref{Any}(nothing)
 const _SNOPT_CALLBACK_ERROR = Ref{Any}(nothing)
+const _SNOPT_CALLBACK_BACKTRACE = Ref{Any}(nothing)
 # Last `DomainError` treated as "undefined here" (Status = -1), for the warning
 # issued when SNOPT cannot recover from it.
 const _SNOPT_LAST_DOMAIN_ERROR = Ref{Any}(nothing)
@@ -126,10 +136,18 @@ end
 # with INFO 61-63, `:User_Supplied_Function_Undefined`). Only a `DomainError`
 # (sqrt or log of a negative number, ...) is treated this way. Every other
 # error, including `InterruptException` (Ctrl-C), uses Status = -2, which stops
-# SNOPT immediately; `solve_snopt` then rethrows the error. Only a `DomainError`
-# thrown directly counts: one wrapped in another exception (for example a
-# `TaskFailedException` from a task spawned in `fitness`) stops the solve.
-snopt_callback_status(err) = err isa DomainError ? Cint(-1) : Cint(-2)
+# SNOPT immediately; `solve_snopt` then rethrows the error. A `DomainError`
+# thrown in a task spawned by `fitness` arrives wrapped in a
+# `TaskFailedException` (or a `CompositeException` from `@sync`) and counts too.
+snopt_callback_status(err) = is_domain_error(err) ? Cint(-1) : Cint(-2)
+
+is_domain_error(::DomainError) = true
+is_domain_error(err::TaskFailedException) = is_domain_error(err.task.exception)
+is_domain_error(err::CapturedException) = is_domain_error(err.ex)
+function is_domain_error(err::CompositeException)
+    return !isempty(err.exceptions) && all(is_domain_error, err.exceptions)
+end
+is_domain_error(_) = false
 
 function snopt_bound(x)
     v = Float64(x)
@@ -174,6 +192,61 @@ function snopt_missing_install_names(libpath::AbstractString)
     return unique(deps)
 end
 
+# Directory for the relocated copies of `libpath` and its `libsnopt7` core,
+# keyed on both files' paths, sizes and modification times, under this
+# package's scratch space in the first depot. `nothing` if there is no depot.
+function snopt_relocation_cache_dir(libpath::AbstractString, core::AbstractString)
+    isempty(DEPOT_PATH) && return nothing
+    key = try
+        hash((
+            realpath(libpath), filesize(libpath), mtime(libpath),
+            realpath(core), filesize(core), mtime(core),
+        ))
+    catch
+        return nothing
+    end
+    return joinpath(
+        first(DEPOT_PATH), "scratchspaces", "e604ab98-cb68-4d52-a41a-b2fbd5dba595",
+        "snopt_relocated", string(key; base=16),
+    )
+end
+
+# Copy the wrapper and its core into `dir`, point the wrapper's missing
+# `libsnopt7` install names at the copy next to it, and re-sign both. Returns
+# the path of the copied wrapper, or `nothing` if a tool failed.
+function build_relocated_snopt(dir, libpath, core, missing_deps, tool)
+    tmpcore = joinpath(dir, "libsnopt7." * Libdl.dlext)
+    tmpwrap = joinpath(dir, basename(libpath))
+    try
+        cp(core, tmpcore; follow_symlinks=true, force=true)
+        cp(libpath, tmpwrap; follow_symlinks=true, force=true)
+    catch
+        return nothing  # disk full, quota, ...: never fail the package load
+    end
+    for old in missing_deps
+        try
+            run(pipeline(`$tool -change $old @loader_path/libsnopt7.$(Libdl.dlext) $tmpwrap`; stderr=devnull))
+        catch
+            return nothing
+        end
+    end
+    codesign = Sys.which("codesign")
+    if codesign !== nothing
+        try
+            run(pipeline(`$codesign --force --sign - $tmpwrap`; stdout=devnull, stderr=devnull))
+            run(pipeline(`$codesign --force --sign - $tmpcore`; stdout=devnull, stderr=devnull))
+        catch
+            return nothing
+        end
+    end
+    return tmpwrap
+end
+
+# On macOS, a wrapper whose `libsnopt7` install name points to a missing file
+# (common in prebuilt SNOPT distributions) cannot be loaded as is. Load a copy
+# whose install name points to a copy of the core next to it. The copies are
+# made once and cached in the package's scratch space, so later sessions load
+# them directly; a temporary directory is used if the cache cannot be written.
 function relocate_snopt_library(libpath::AbstractString)
     Sys.isapple() || return String(libpath)
     missing_deps = snopt_missing_install_names(libpath)
@@ -183,29 +256,54 @@ function relocate_snopt_library(libpath::AbstractString)
     isfile(core) || return String(libpath)
     tool = Sys.which("install_name_tool")
     tool === nothing && return String(libpath)
-    tmp = mktempdir()
+
+    cache = snopt_relocation_cache_dir(libpath, core)
+    if cache !== nothing
+        cached = joinpath(cache, basename(libpath))
+        isfile(cached) && isfile(joinpath(cache, "libsnopt7." * Libdl.dlext)) && return cached
+        # An incomplete cache entry (e.g. a file deleted by hand) would block
+        # the rename below forever; move it aside and rebuild. Recheck first,
+        # so that an entry another session has just completed is kept.
+        complete() = isfile(cached) && isfile(joinpath(cache, "libsnopt7." * Libdl.dlext))
+        if isdir(cache) && !complete()
+            try
+                stale = cache * ".stale-" * string(hash((time_ns(), getpid())); base=16)
+                mv(cache, stale)
+                rm(stale; recursive=true, force=true)
+            catch
+            end
+        end
+        complete() && return cached
+        # Build in a private directory and rename it into place, so concurrent
+        # Julia sessions never load a half-written copy.
+        staged = try
+            mkpath(dirname(cache))
+            mktempdir(dirname(cache); cleanup=false)
+        catch
+            nothing
+        end
+        if staged !== nothing
+            built = build_relocated_snopt(staged, libpath, core, missing_deps, tool)
+            if built !== nothing
+                try
+                    mv(staged, cache)
+                catch
+                    # Another session finished first; use its copy.
+                end
+            end
+            rm(staged; recursive=true, force=true)
+            isfile(cached) && return cached
+        end
+    end
+
+    tmp = try
+        mktempdir()
+    catch
+        return String(libpath)
+    end
     push!(SNOPT_TEMPDIRS, tmp)
-    tmpcore = joinpath(tmp, "libsnopt7." * Libdl.dlext)
-    tmpwrap = joinpath(tmp, basename(libpath))
-    cp(core, tmpcore; follow_symlinks=true)
-    cp(libpath, tmpwrap; follow_symlinks=true)
-    for old in missing_deps
-        try
-            run(pipeline(`$tool -change $old @loader_path/libsnopt7.$(Libdl.dlext) $tmpwrap`; stderr=devnull))
-        catch
-            return String(libpath)
-        end
-    end
-    codesign = Sys.which("codesign")
-    if codesign !== nothing
-        try
-            run(pipeline(`$codesign --force --sign - $tmpwrap`; stdout=devnull, stderr=devnull))
-            run(pipeline(`$codesign --force --sign - $tmpcore`; stdout=devnull, stderr=devnull))
-        catch
-            return String(libpath)
-        end
-    end
-    return tmpwrap
+    built = build_relocated_snopt(tmp, libpath, core, missing_deps, tool)
+    return built === nothing ? String(libpath) : built
 end
 
 function library_has_snopt_c_api(handle::Ptr{Cvoid})
@@ -221,7 +319,13 @@ function loadable_snopt_library(libpath::AbstractString)
     isempty(libpath) && return "", false
     prepared = String(libpath)
     if isfile(libpath)
-        prepared = relocate_snopt_library(libpath)
+        # Never let the macOS relocation (external tools, file copies) break
+        # the package load; fall back to loading the library as is.
+        prepared = try
+            relocate_snopt_library(libpath)
+        catch
+            String(libpath)
+        end
         preload_snopt_companions(prepared)
     end
     handle = Libdl.dlopen_e(prepared)
@@ -244,15 +348,15 @@ function snopt_search_dirs()
         push!(dirs, ENV["SNOPTDIR"])
     end
     pkgroot = dirname(@__DIR__)
-    push!(dirs, joinpath(pkgroot, "__references", "libsnopt7_cpp"))
     push!(dirs, joinpath(pkgroot, "deps", "usr", "lib"))
+    # Empty entries in a search path (`a::b`, a trailing `:`) would turn into
+    # bare library names; the system loader is tried separately at the end.
+    pathlist(var, sep) = filter!(!isempty, split(get(ENV, var, ""), sep))
     if Sys.iswindows()
-        haskey(ENV, "PATH") && append!(dirs, split(ENV["PATH"], ';'))
+        append!(dirs, pathlist("PATH", ';'))
     else
-        haskey(ENV, "LD_LIBRARY_PATH") && append!(dirs, split(ENV["LD_LIBRARY_PATH"], ':'))
-        if Sys.isapple() && haskey(ENV, "DYLD_LIBRARY_PATH")
-            append!(dirs, split(ENV["DYLD_LIBRARY_PATH"], ':'))
-        end
+        append!(dirs, pathlist("LD_LIBRARY_PATH", ':'))
+        Sys.isapple() && append!(dirs, pathlist("DYLD_LIBRARY_PATH", ':'))
     end
     return dirs
 end
@@ -306,7 +410,51 @@ function find_snopt_lib()
     return ""
 end
 
-function snopt_init_workspace!(printpath, summpath, cw, iw, rw)
+# `true` if the `sninit_` fallback can open Print and Summary files itself, with
+# the Fortran helpers in the core `libsnopt7` library.
+function snopt_fallback_opens_files()
+    isempty(libsnopt7_core) && return false
+    handle = Libdl.dlopen_e(libsnopt7_core)
+    handle == C_NULL && return false
+    try
+        return Libdl.dlsym_e(handle, :snfileopenwrite_) != C_NULL &&
+               Libdl.dlsym_e(handle, :snfileclose_) != C_NULL
+    finally
+        Libdl.dlclose(handle)
+    end
+end
+
+# Fortran unit for one output file on the `sninit_` fallback path: 0 for none,
+# 6 for the console, otherwise `unit` after opening the file on it (recorded in
+# `opened` so that it is closed after the solve).
+function snopt_fallback_unit!(opened, path, unit)
+    name = _snopt_trim(path)
+    isempty(name) && return Cint(0)
+    _snopt_is_console_name(name) && return SNOPT_CONSOLE_UNIT
+    inform = Ref{Cint}(-1)
+    ccall(
+        (:snfileopenwrite_, libsnopt7_core),
+        Cvoid,
+        (Ref{Cint}, Ptr{UInt8}, Ref{Cint}, Csize_t),
+        unit,
+        name,
+        inform,
+        ncodeunits(name),
+    )
+    inform[] == 0 || throw(ArgumentError("SNOPT could not open $(repr(name)) (INFO $(inform[]))"))
+    push!(opened, unit)
+    return unit
+end
+
+function snopt_close_fallback_units!(opened)
+    for unit in opened
+        ccall((:snfileclose_, libsnopt7_core), Cvoid, (Ref{Cint},), unit)
+    end
+    empty!(opened)
+    return nothing
+end
+
+function snopt_init_workspace!(printpath, summpath, cw, iw, rw, opened)
     if libsnopt7_has_sninitx
         ccall(
             (:f_sninitx, libsnopt7),
@@ -323,13 +471,13 @@ function snopt_init_workspace!(printpath, summpath, cw, iw, rw)
         )
     else
         # Some C wrappers export `f_sninit` with a broken ABI. The Fortran
-        # `sninit_` in the companion libsnopt7 library is reliable.
+        # `sninit_` in the companion libsnopt7 library is reliable. `solve_snopt`
+        # has cleared the file names already if they cannot be opened here.
         if isempty(libsnopt7_core)
             global libsnopt7_core = libsnopt7
         end
-        iprint = Ref{Cint}(0)
-        # Unit 6 is Fortran stdout (SNOPT Summary file; see snInit / Major print level).
-        isumm = Ref{Cint}(_snopt_is_screen(summpath) ? 6 : 0)
+        iprint = Ref{Cint}(snopt_fallback_unit!(opened, printpath, SNOPT_FALLBACK_PRINT_UNIT))
+        isumm = Ref{Cint}(snopt_fallback_unit!(opened, summpath, SNOPT_FALLBACK_SUMMARY_UNIT))
         lencw = Ref{Cint}(div(length(cw), 8))
         leniw = Ref{Cint}(length(iw))
         lenrw = Ref{Cint}(length(rw))
@@ -448,13 +596,8 @@ function apply_snopt_option!(iw, leniw, rw, lenrw, key, val)
     return nothing
 end
 
-function _snopt_is_screen(path::AbstractString)
-    s = lowercase(strip(String(path)))
-    return s == "screen" || s == "stdout" || s == "-"
-end
-
 function _snopt_console_summary(major_print_level, summfile::AbstractString)
-    isempty(summfile) || return _snopt_is_screen(summfile)
+    isempty(summfile) || return _snopt_is_console_name(summfile)
     major_print_level === nothing && return false
     if major_print_level isa Number
         return major_print_level != 0
@@ -488,13 +631,13 @@ end
 # so all comparisons below use `rstrip`, never `strip`.
 _snopt_trim(path::AbstractString) = rstrip(String(path))
 
-# f_sninitx treats only the exact word "screen" (after trimming) as the console.
+# Only the exact word "screen" (after trimming trailing blanks) means the
+# console. f_sninitx writes to a file with any other name, including "stdout"
+# and "-"; the `sninit_` fallback path follows the same rule.
 _snopt_is_console_name(path::AbstractString) = _snopt_trim(path) == "screen"
 
 # Normalized key for comparing output file names: absolute path with the
-# directory resolved through symlinks when it exists. Errs on the side of calling
-# two names the same: case is folded on macOS/Windows, whose file systems are
-# case-insensitive by default.
+# directory resolved through symlinks when it exists.
 function _snopt_file_key(path::AbstractString)
     p = abspath(_snopt_trim(path))
     dir, base = dirname(p), basename(p)
@@ -505,32 +648,109 @@ function _snopt_file_key(path::AbstractString)
             dir
         end
     end
-    key = joinpath(dir, base)
-    return (Sys.isapple() || Sys.iswindows()) ? lowercase(key) : key
+    return joinpath(dir, base)
+end
+
+# Whether names in `dir` that differ only in case refer to the same file, found
+# by creating a probe file there. macOS and Windows volumes are usually case
+# insensitive, but not always. If the probe cannot be created, assume they are
+# (two such names are then rejected, which is the safe side).
+function _snopt_dir_is_case_insensitive(dir::AbstractString)
+    # Not `rand`: leave the global random stream alone.
+    name = "NLPInterfaceCaseProbe_" * string(hash((time_ns(), getpid(), objectid(dir))); base=16)
+    probe = joinpath(dir, name)
+    try
+        touch(probe)
+    catch
+        return true
+    end
+    try
+        return isfile(joinpath(dir, lowercase(name)))
+    catch
+        return true
+    finally
+        rm(probe; force=true)
+    end
 end
 
 function _snopt_same_output_file(a::AbstractString, b::AbstractString)
     a_, b_ = _snopt_trim(a), _snopt_trim(b)
     (isempty(a_) || isempty(b_)) && return false
     (_snopt_is_console_name(a_) || _snopt_is_console_name(b_)) && return false
-    _snopt_file_key(a_) == _snopt_file_key(b_) && return true
+    ka, kb = _snopt_file_key(a_), _snopt_file_key(b_)
+    ka == kb && return true
     # Different names for one existing file (file symlinks, hard links).
-    return try
-        ispath(a_) && ispath(b_) && samefile(a_, b_)
+    try
+        ispath(a_) && ispath(b_) && samefile(a_, b_) && return true
     catch
+    end
+    # Names that differ only in case, on a case-insensitive volume.
+    if (Sys.isapple() || Sys.iswindows()) && lowercase(ka) == lowercase(kb)
+        dir = dirname(ka)
+        return !isdir(dir) || _snopt_dir_is_case_insensitive(dir)
+    end
+    return false
+end
+
+# `test(path)` (`ispath`, `isdir`, ...), with `false` where `stat` itself fails,
+# e.g. ELOOP on a symlink loop.
+function _snopt_stat_ok(test, path)
+    return try
+        test(path)
+    catch err
+        err isa Base.IOError || rethrow()
         false
     end
+end
+
+# Open `path` for appending (creating it if needed) to find out whether SNOPT
+# will be able to write it, then remove it again if it did not exist. Paths that
+# exist but are not regular files (`/dev/null`, a FIFO) are not probed, since
+# opening a FIFO blocks.
+function check_snopt_output_writable(opt::AbstractString, path::AbstractString, depth::Int=0)
+    if islink(path) && !_snopt_stat_ok(ispath, path)
+        # A dangling symlink: opening it creates its target, so probe (and then
+        # remove) the target instead of deleting the link. Give up on cycles.
+        depth < 32 || throw(ArgumentError("$opt is a symlink loop: $(repr(path))"))
+        target = readlink(path)
+        isabspath(target) || (target = joinpath(dirname(abspath(path)), target))
+        return check_snopt_output_writable(opt, target, depth + 1)
+    end
+    existed = _snopt_stat_ok(ispath, path)
+    existed && !_snopt_stat_ok(isfile, path) && return nothing
+    try
+        open(identity, path, "a")
+    catch err
+        throw(
+            ArgumentError(
+                "$opt cannot be opened for writing: $(repr(path)) " *
+                "($(sprint(showerror, err)))",
+            ),
+        )
+    end
+    existed || rm(path; force=true)
+    return nothing
 end
 
 # Opening one file on both the Print and Summary units makes the Fortran OPEN
 # fail; SNOPT then returns INFO 91 without solving, and the unit is left
 # half-open so every later solve that names that file fails the same way until
 # Julia restarts. Reject such pairs before SNOPT sees them. Also reject paths that
-# cannot be opened for an obvious reason (missing directory, path is a
-# directory): SNOPT would silently return INFO 91 for those. Other OPEN failures,
-# such as a directory without write permission, still surface only as
-# `:Invalid_Problem_Definition`.
+# cannot be opened for writing (missing directory, path is a directory, no write
+# permission): SNOPT would silently fail on those, with INFO 91 or a misleading
+# status such as `:Numerical_Difficulties`.
 function check_snopt_output_files(printpath::AbstractString, summpath::AbstractString)
+    try
+        _check_snopt_output_files(printpath, summpath)
+    catch err
+        # e.g. EACCES from `stat` on a directory without search permission
+        err isa Base.IOError || rethrow()
+        throw(ArgumentError("Print_file/Summary_file cannot be used: $(sprint(showerror, err))"))
+    end
+    return nothing
+end
+
+function _check_snopt_output_files(printpath::AbstractString, summpath::AbstractString)
     for (opt, p) in (("Print_file", printpath), ("Summary_file", summpath))
         p_ = _snopt_trim(p)
         (isempty(p_) || _snopt_is_console_name(p_)) && continue
@@ -542,7 +762,8 @@ function check_snopt_output_files(printpath::AbstractString, summpath::AbstractS
                 "(paths are used literally; `~` is not expanded)",
             ),
         )
-        isdir(full) && throw(ArgumentError("$opt names a directory, not a file: $(repr(full))"))
+        _snopt_stat_ok(isdir, full) &&
+            throw(ArgumentError("$opt names a directory, not a file: $(repr(full))"))
     end
     if _snopt_same_output_file(printpath, summpath)
         throw(
@@ -550,9 +771,15 @@ function check_snopt_output_files(printpath::AbstractString, summpath::AbstractS
                 "Print_file and Summary_file refer to the same file " *
                 "($(repr(printpath)) and $(repr(summpath))); SNOPT cannot open " *
                 "one file on two output units. Use two different files " *
-                "(on macOS/Windows, names differing only in case count as the same).",
+                "(names differing only in case are the same file on a " *
+                "case-insensitive volume).",
             ),
         )
+    end
+    for (opt, p) in (("Print_file", printpath), ("Summary_file", summpath))
+        p_ = _snopt_trim(p)
+        (isempty(p_) || _snopt_is_console_name(p_)) && continue
+        check_snopt_output_writable(opt, p_)
     end
     return nothing
 end
@@ -582,13 +809,43 @@ function snopta_usrfun_trampoline(
         status = snopt_callback_status(err)
         if status <= -2
             # Keep the first error: SNOPT stops after this callback returns.
-            _SNOPT_CALLBACK_ERROR[] === nothing && (_SNOPT_CALLBACK_ERROR[] = err)
+            if _SNOPT_CALLBACK_ERROR[] === nothing
+                _SNOPT_CALLBACK_ERROR[] = err
+                _SNOPT_CALLBACK_BACKTRACE[] = catch_backtrace()
+            end
         else
             _SNOPT_LAST_DOMAIN_ERROR[] = err
         end
         unsafe_store!(status_, status)
     end
     return
+end
+
+# Run `f` holding `SNOPT_LOCK`. If another solve holds it for longer than
+# `SNOPT_LOCK_WAIT_WARN_SECONDS`, warn: a deadlock is likely when the running
+# solve's `fitness` waits for this task (it cannot be detected reliably).
+function with_snopt_lock(f)
+    if !trylock(SNOPT_LOCK)
+        delay = SNOPT_LOCK_WAIT_WARN_SECONDS[]
+        timer = Timer(delay) do _
+            # Once per session: concurrent long solves wait legitimately.
+            @warn "solve_snopt has waited $(delay) s for another SNOPT solve to " *
+                  "finish. Only one SNOPT solve runs at a time, so this is expected " *
+                  "when several tasks solve concurrently; but if the running solve's " *
+                  "fitness waits for this task (for example a worker pool fed from " *
+                  "fitness), it is a deadlock." maxlog = 1
+        end
+        try
+            lock(SNOPT_LOCK)
+        finally
+            close(timer)
+        end
+    end
+    try
+        return f()
+    finally
+        unlock(SNOPT_LOCK)
+    end
 end
 
 function dense_jacobian_pattern(nF::Int, n::Int)
@@ -622,28 +879,42 @@ as SNOPT options (underscores become spaces).
 The lengths of `ceq` and `cineq` must equal `n_ceq` and `n_cineq` at every
 evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
 
-`Print_file` and `Summary_file` must name different files; two names for one
-file throw an `ArgumentError`.
+Bounds must satisfy `x_lb <= x_ub` and not be `NaN`, and `x0` must be
+non-empty and finite; otherwise an `ArgumentError` is thrown.
 
-If `fitness` throws a `DomainError`, SNOPT treats the functions as undefined at
-that point and shortens the step; the error is not rethrown. If SNOPT cannot
-recover, it ends with a failure status, usually
+`Print_file` and `Summary_file` must name different files that can be opened
+for writing; otherwise an `ArgumentError` is thrown before SNOPT starts. Only
+the exact name `"screen"` means the console; any other name, including
+`"stdout"`, is a file. On libraries without `f_sninitx`, files are opened with
+SNOPT's own Fortran helpers; if the library lacks those too, the file names are
+ignored with a warning.
+
+If `fitness` throws a `DomainError` (directly, or from a task it spawned, i.e.
+wrapped in a `TaskFailedException` or `CompositeException`), SNOPT treats the
+functions as undefined at that point and shortens the step; the error is not
+rethrown. If SNOPT cannot recover, it ends with a failure status, usually
 `:User_Supplied_Function_Undefined` (then the last `DomainError` is shown in a
-warning). Any other exception, including `InterruptException` (Ctrl-C) and a
-`DomainError` wrapped in another exception, stops SNOPT at once and is rethrown
-by `solve_snopt`.
+warning). Any other exception, including `InterruptException` (Ctrl-C), stops
+SNOPT at once and is rethrown by `solve_snopt`.
 
 Only one SNOPT solve runs at a time. Calling `solve_snopt` from inside
 `fitness` (or, on Julia 1.11 and later, from a task spawned there while the
 solve runs) throws an error, since SNOPT's C interface keeps global state.
-Handing the call to a task that existed before the solve deadlocks.
+Handing the call to a task that existed before the solve deadlocks; a solve
+that waits more than a minute for another one to finish logs a warning saying
+so.
 
 `fitness` must not keep a reference to `x`: the array is reused between calls
 (copy it to keep it).
 
 Returns `(xopt, fopt, info)`. `info` is a symbol from
-`NLPInterface.SNOPT_RETURN_STATUS`. `fopt` is `NaN` if no evaluation of
-`fitness` requested by SNOPT completed. `:Solve_Succeeded`,
+`NLPInterface.SNOPT_RETURN_STATUS`. `fopt` is the objective of a plain
+(`Float64`) evaluation of `fitness` at `xopt`, so it matches `fitness(xopt)`
+even when SNOPT's last evaluation was at another point (a derivative check) or
+used ForwardDiff Dual numbers; `fitness` is called once more after the solve
+unless its last plain evaluation was at `xopt`. `fopt` is `NaN` if no
+evaluation of `fitness` requested by SNOPT completed, or if `fitness` throws a
+`DomainError` at `xopt`. `:Solve_Succeeded`,
 `:Solved_To_Acceptable_Level`, and `:Feasible_Point_Found` (only with the
 `Feasible point` option) mean SNOPT returned a feasible point.
 `:Elastic_Objective_Minimized` and `:Elastic_Infeasibilities_Minimized` end the
@@ -662,19 +933,8 @@ function solve_snopt(
 )
     require_snopt()
     check_snopt_not_nested()
+    check_solver_inputs(x0, x_lb, x_ub, n_ceq, n_cineq, deriv)
     n = length(x0)
-    if n == 0
-        throw(ArgumentError("x0 must be non-empty"))
-    end
-    if !(n == length(x_lb) == length(x_ub))
-        throw(ArgumentError("x0, x_lb, and x_ub must have the same length"))
-    end
-    if n_ceq < 0 || n_cineq < 0
-        throw(ArgumentError("n_ceq and n_cineq must be non-negative"))
-    end
-    if deriv !== :forwarddiff && deriv !== :finitediff
-        throw(ArgumentError("Unknown deriv=$deriv; use :forwarddiff or :finitediff"))
-    end
 
     # Always a fresh array: SNOPT writes the solution into `x` in place, and
     # `convert` would return the caller's `x0` itself when it is a Vector{Float64}.
@@ -711,6 +971,10 @@ function solve_snopt(
     # Set once `fitness` has returned a value. Until then `F` holds only the
     # zeros it was initialized with, which must not be reported as `fopt`.
     f_evaluated = Ref(false)
+    # The last point whose residual came from a plain (Float64) call, and its
+    # objective, so the final `fopt` can skip a call when SNOPT ends there.
+    x_plain = fill(NaN, n)
+    f_plain = Ref(NaN)
 
     function usrfun(
         status_::Ptr{Cint},
@@ -736,11 +1000,19 @@ function solve_snopt(
             Gg .= vec(J_buf)
         elseif needF
             residual_value!(evaluator, r_buf, xv)
+        else
+            return
+        end
+        f_evaluated[] = true
+        if !needG || deriv === :finitediff
+            # The residual came from a plain call (finite differences evaluate
+            # the base point plainly).
+            x_plain .= xv
+            f_plain[] = r_buf[1]
         end
         if needF
             Ff = unsafe_wrap(Array, F_, Int(unsafe_load(neF_)))
             Ff .= r_buf
-            f_evaluated[] = true
         end
         return
     end
@@ -765,11 +1037,17 @@ function solve_snopt(
         summfile;
         console_summary=_snopt_console_summary(major_print_level, summfile),
     )
-    if libsnopt7_has_sninitx
+    if libsnopt7_has_sninitx || snopt_fallback_opens_files()
         check_snopt_output_files(printpath, summpath)
-    elseif any(p -> !isempty(strip(p)) && !_snopt_is_screen(p), (printpath, summpath))
-        @warn "This SNOPT library has no f_sninitx; Print_file and Summary_file " *
-              "names are ignored (only a console summary is available)." maxlog = 1
+    else
+        is_file_name(p) = !isempty(_snopt_trim(p)) && !_snopt_is_console_name(p)
+        if any(is_file_name, (printpath, summpath))
+            @warn "This SNOPT library has neither f_sninitx nor snFileOpenWrite; " *
+                  "Print_file and Summary_file names are ignored (only \"screen\" " *
+                  "is available)." maxlog = 1
+        end
+        is_file_name(printpath) && (printpath = "")
+        is_file_name(summpath) && (summpath = "")
     end
 
     iw = zeros(Int32, 500 + 100 * (n + nF))
@@ -778,6 +1056,7 @@ function solve_snopt(
     iu = Int32[0]
     ru = [0.0]
     initialized = Ref(false)
+    fallback_units = Cint[]
 
     inform = Ref{Cint}(0)
     nS = Ref{Cint}(0)
@@ -796,13 +1075,15 @@ function solve_snopt(
         ),
     )
 
-    return lock(SNOPT_LOCK) do
+    return with_snopt_lock() do
         _with_snopt_in_solve() do
             _SNOPT_USRFUN[] = usrfun
             _SNOPT_CALLBACK_ERROR[] = nothing
             _SNOPT_LAST_DOMAIN_ERROR[] = nothing
             try
-                snopt_init_workspace!(printpath, summpath, cw, iw, rw)
+                # Units opened for the fallback path are closed in `finally`
+                # even if this throws.
+                snopt_init_workspace!(printpath, summpath, cw, iw, rw, fallback_units)
                 initialized[] = true
 
                 meminfo = Ref{Cint}(0)
@@ -825,6 +1106,11 @@ function solve_snopt(
                     rw,
                     length(rw),
                 )
+                if meminfo[] != SNOPT_MEMA_OK
+                    # `miniw`/`minrw` are not meaningful; report SNOPT's status
+                    # (81-84: not enough workspace) without solving.
+                    return copy(x), NaN, get(SNOPT_RETURN_STATUS, Int(meminfo[]), :Unknown)
+                end
                 if Int(miniw[]) > length(iw)
                     resize!(iw, Int(miniw[]))
                     snopt_set_option!(iw, length(iw), rw, length(rw), "Total integer workspace", length(iw))
@@ -900,6 +1186,7 @@ function solve_snopt(
                 if _SNOPT_CALLBACK_ERROR[] !== nothing
                     err = _SNOPT_CALLBACK_ERROR[]
                     _SNOPT_CALLBACK_ERROR[] = nothing
+                    @debug "fitness threw inside solve_snopt; backtrace at the throw site:" exception = (err, _SNOPT_CALLBACK_BACKTRACE[])
                     throw(err)
                 end
                 status = Int(inform[])
@@ -910,12 +1197,27 @@ function solve_snopt(
                           "the last DomainError thrown by fitness was:" exception = domain_err
                 end
                 # NaN if no `fitness` evaluation requested by SNOPT completed (e.g.
-                # INFO 91, or INFO 61 when `fitness` is undefined at `x0`).
-                fopt = f_evaluated[] ? F[1] : NaN
+                # INFO 91, or INFO 61 when `fitness` is undefined at `x0`). `F[1]`
+                # is not used: SNOPT may leave it at another point (its derivative
+                # check perturbs `x`), and with ForwardDiff it comes from a Dual
+                # evaluation.
+                fopt = if !f_evaluated[]
+                    NaN
+                elseif isequal(x_plain, x)
+                    f_plain[]
+                else
+                    try
+                        residual_value!(evaluator, r_buf, x)[1]
+                    catch err
+                        is_domain_error(err) || rethrow()
+                        NaN
+                    end
+                end
                 return copy(x), fopt, info
             finally
                 _SNOPT_USRFUN[] = nothing
                 _SNOPT_CALLBACK_ERROR[] = nothing
+                _SNOPT_CALLBACK_BACKTRACE[] = nothing
                 _SNOPT_LAST_DOMAIN_ERROR[] = nothing
                 if initialized[]
                     ccall(
@@ -928,6 +1230,7 @@ function solve_snopt(
                         length(rw),
                     )
                 end
+                snopt_close_fallback_units!(fallback_units)
             end
         end
     end
