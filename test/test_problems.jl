@@ -1,4 +1,6 @@
 # End-to-end solves of the problems in problems.jl with both solvers.
+# Relative tolerance on fopt: with constraint violation ~1e-8 and large multipliers,
+# fopt on problems with |f| in the hundreds or thousands moves by ~1e-5.
 
 @testset "$name" for name in sort!(collect(keys(problems)))
     p = problems[name]
@@ -24,7 +26,7 @@
         @test p.x0 == x0_before
         @test info in (:Solve_Succeeded, :Solved_To_Acceptable_Level)
         @test xopt ≈ p.xopt atol = 1e-4
-        @test fopt ≈ p.fopt atol = 1e-5
+        @test fopt ≈ p.fopt atol = 1e-5 rtol = 1e-7
         _, ceq, cineq = p.fitness(xopt)
         @test all(abs.(ceq) .<= 1e-6)
         @test all(cineq .<= 1e-6)
@@ -52,7 +54,7 @@
             @test p.x0 == x0_before
             @test info in (:Solve_Succeeded, :Solved_To_Acceptable_Level)
             @test xopt ≈ p.xopt atol = 1e-4
-            @test fopt ≈ p.fopt atol = 1e-5
+            @test fopt ≈ p.fopt atol = 1e-5 rtol = 1e-7
             _, ceq, cineq = p.fitness(xopt)
             @test all(abs.(ceq) .<= 1e-6)
             @test all(cineq .<= 1e-6)

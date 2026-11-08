@@ -4,7 +4,7 @@ using NLPInterface
 
 include(joinpath(@__DIR__, "..", "test", "problems.jl"))
 
-solver = "snopt"    # "snopt" or "ipopt"
+solver = "ipopt"    # "snopt" or "ipopt"
 
 p = problems["rosenbrock"]
 
