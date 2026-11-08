@@ -4,6 +4,10 @@ using Test
 
 include("problems.jl")
 
+# An iterator without a `length` method (its `IteratorSize` defaults to HasLength).
+struct NoLengthIter end
+Base.iterate(::NoLengthIter, s=0) = s < 2 ? (Float64(s), s + 1) : nothing
+
 @testset "NLPInterface" begin
     @testset "$name" for name in sort!(collect(keys(problems)))
         p = problems[name]
@@ -413,7 +417,8 @@ include("problems.jl")
         for (x0, lb, ub) in (([missing, 0.0], [-1.0, -1.0], [1.0, 1.0]),
                              ([0.0, 0.0], [nothing, -1.0], [1.0, 1.0]),
                              ([0.0, 0.0], [-1.0, -1.0], Any[1.0, "1"]),
-                             ([big"1e400", 0.0], [-Inf, -1.0], [Inf, 1.0]))  # Inf as Float64
+                             ([big"1e400", 0.0], [-Inf, -1.0], [Inf, 1.0]),  # Inf as Float64
+                             ([0.0, 0.0], [big"1e400", -1.0], [Inf, 1.0]))   # +Inf lower bound
             @test_throws ArgumentError NLPInterface.check_solver_inputs(x0, lb, ub, 0, 0, :forwarddiff)
         end
         err = try
@@ -454,6 +459,8 @@ include("problems.jl")
         # unordered collections are rejected
         @test_throws ArgumentError pr(Set([1.0, 2.0]), 2)
         @test_throws ArgumentError pr(Dict(1 => 2.0), 1)
+        @test_throws ArgumentError pr(Iterators.repeated(1.0), 1)  # infinite
+        @test pr(NoLengthIter(), 2) == [1.0, 0.0, 1.0]
         @test_throws ArgumentError NLPInterface.packed_residual(x -> ([1.0], nothing, nothing), x, 0, 0)
         @test_throws ArgumentError NLPInterface.packed_residual(x -> (nothing, nothing, nothing), x, 0, 0)
         # the Dual (ForwardDiff) path checks entries too
@@ -580,6 +587,15 @@ include("problems.jl")
                     @test_throws ArgumentError check("", joinpath(ro, "s.out"))
                 finally
                     chmod(ro, 0o700)
+                end
+                noexec = joinpath(dir, "noexec")
+                mkpath(joinpath(noexec, "x"))
+                chmod(noexec, 0o600)  # no search permission: stat fails with EACCES
+                try
+                    @test_throws ArgumentError check(joinpath(noexec, "p.out"), "")
+                    @test_throws ArgumentError check(joinpath(noexec, "x", "p.out"), "")
+                finally
+                    chmod(noexec, 0o700)
                 end
             end
             insensitive = NLPInterface._snopt_dir_is_case_insensitive(dir)

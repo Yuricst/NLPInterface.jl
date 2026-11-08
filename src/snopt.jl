@@ -262,13 +262,18 @@ function relocate_snopt_library(libpath::AbstractString)
         cached = joinpath(cache, basename(libpath))
         isfile(cached) && isfile(joinpath(cache, "libsnopt7." * Libdl.dlext)) && return cached
         # An incomplete cache entry (e.g. a file deleted by hand) would block
-        # the rename below forever; remove it and rebuild.
-        if isdir(cache)
+        # the rename below forever; move it aside and rebuild. Recheck first,
+        # so that an entry another session has just completed is kept.
+        complete() = isfile(cached) && isfile(joinpath(cache, "libsnopt7." * Libdl.dlext))
+        if isdir(cache) && !complete()
             try
-                rm(cache; recursive=true, force=true)
+                stale = cache * ".stale-" * string(hash((time_ns(), getpid())); base=16)
+                mv(cache, stale)
+                rm(stale; recursive=true, force=true)
             catch
             end
         end
+        complete() && return cached
         # Build in a private directory and rename it into place, so concurrent
         # Julia sessions never load a half-written copy.
         staged = try
@@ -735,6 +740,17 @@ end
 # permission): SNOPT would silently fail on those, with INFO 91 or a misleading
 # status such as `:Numerical_Difficulties`.
 function check_snopt_output_files(printpath::AbstractString, summpath::AbstractString)
+    try
+        _check_snopt_output_files(printpath, summpath)
+    catch err
+        # e.g. EACCES from `stat` on a directory without search permission
+        err isa Base.IOError || rethrow()
+        throw(ArgumentError("Print_file/Summary_file cannot be used: $(sprint(showerror, err))"))
+    end
+    return nothing
+end
+
+function _check_snopt_output_files(printpath::AbstractString, summpath::AbstractString)
     for (opt, p) in (("Print_file", printpath), ("Summary_file", summpath))
         p_ = _snopt_trim(p)
         (isempty(p_) || _snopt_is_console_name(p_)) && continue

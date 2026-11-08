@@ -17,7 +17,19 @@ function normalize_block(block)
     if !(block isa Union{AbstractString,AbstractChar,Number,Missing,Symbol,Some,AbstractSet,AbstractDict}) &&
        applicable(iterate, block)
         size = Base.IteratorSize(block)
-        return size isa Union{Base.HasLength,Base.HasShape} ? block : collect(block)
+        if size isa Base.IsInfinite
+            throw(ArgumentError("constraint block is an infinite iterator ($(typeof(block)))"))
+        end
+        # Julia's default `IteratorSize` is `HasLength`, even for iterators
+        # without a `length` method; collect those too.
+        known = size isa Union{Base.HasLength,Base.HasShape} && applicable(length, block)
+        known && return block
+        # Not `collect`, which itself calls `length` for `HasLength` iterators.
+        values = Any[]
+        for v in block
+            push!(values, v)
+        end
+        return values
     end
     throw(
         ArgumentError(

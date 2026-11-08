@@ -36,6 +36,9 @@ function check_solver_inputs(x0, x_lb, x_ub, n_ceq, n_cineq, deriv)
     for (i, lb, ub) in zip(eachindex(x_lb), x_lb, x_ub)
         lb isa Real || throw(ArgumentError("x_lb[$i] = $(repr(lb)) is not a real number"))
         ub isa Real || throw(ArgumentError("x_ub[$i] = $(repr(ub)) is not a real number"))
+        # Check the values the solvers see: a BigFloat beyond Float64's range
+        # becomes ±Inf.
+        lb, ub = Float64(lb), Float64(ub)
         isnan(lb) && throw(ArgumentError("x_lb[$i] is NaN"))
         isnan(ub) && throw(ArgumentError("x_ub[$i] is NaN"))
         lb == Inf && throw(ArgumentError("x_lb[$i] = Inf; a lower bound must be below +Inf"))
