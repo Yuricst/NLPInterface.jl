@@ -31,3 +31,11 @@ find_snopt_lib
 ```@docs
 packed_residual
 ```
+
+Internally, a [`ResidualEvaluator`](@ref) computes the residual and its Jacobian with as few `fitness` calls as possible.
+
+```@docs
+ResidualEvaluator
+residual_value!
+residual_value_and_jacobian!
+```

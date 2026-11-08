@@ -72,8 +72,64 @@ libsnopt7 = ""
 libsnopt7_core = ""
 libsnopt7_has_sninitx = false
 
+# The user callback of the running solve. SNOPT's C interface keeps global state
+# (for example the character workspace `__snopt_wrapper_MOD_cw` and the Fortran
+# I/O units of the Print and Summary files), so only one solve may run at a time
+# (`SNOPT_LOCK`) and nested solves are rejected (`_snopt_in_solve`).
 const _SNOPT_USRFUN = Ref{Any}(nothing)
 const _SNOPT_CALLBACK_ERROR = Ref{Any}(nothing)
+# Last `DomainError` treated as "undefined here" (Status = -1), for the warning
+# issued when SNOPT cannot recover from it.
+const _SNOPT_LAST_DOMAIN_ERROR = Ref{Any}(nothing)
+
+# Marks code running inside a `solve_snopt`: the solve itself, its `fitness`
+# callbacks and, where ScopedValues exist (Julia >= 1.11), tasks spawned from
+# them. A nested solve from such a task would deadlock on `SNOPT_LOCK` (other
+# task) or overwrite the outer solve's state (same task), so it throws instead.
+# The scoped value is a per-solve flag that is cleared when the solve ends, so a
+# task spawned from `fitness` that outlives the solve may call `solve_snopt`.
+@static if isdefined(Base, :ScopedValues)
+    const _SNOPT_IN_SOLVE = Base.ScopedValues.ScopedValue{Union{Nothing,Base.RefValue{Bool}}}(nothing)
+    function _snopt_in_solve()
+        active = _SNOPT_IN_SOLVE[]
+        return active !== nothing && active[]
+    end
+    function _with_snopt_in_solve(f)
+        active = Ref(true)
+        try
+            return Base.ScopedValues.with(f, _SNOPT_IN_SOLVE => active)
+        finally
+            active[] = false
+        end
+    end
+else
+    # Julia 1.10: task-local only, so tasks spawned from `fitness` are not covered.
+    _snopt_in_solve() = get(task_local_storage(), :NLPInterface_snopt_in_solve, false)::Bool
+    _with_snopt_in_solve(f) = task_local_storage(f, :NLPInterface_snopt_in_solve, true)
+end
+
+function check_snopt_not_nested()
+    _snopt_in_solve() || return nothing
+    throw(
+        ErrorException(
+            "solve_snopt was called from inside the fitness function of another " *
+            "solve_snopt (or from a task spawned there). SNOPT's C interface keeps " *
+            "global state, so nested solves are not supported; use solve_ipopt for " *
+            "the inner problem, or restructure the problem.",
+        ),
+    )
+end
+
+# What `usrfun` should report to SNOPT when `fitness` throws `err`.
+# Status = -1 means "the functions are undefined at x": SNOPT shortens the step
+# and continues, so the error is not rethrown (if SNOPT cannot recover it ends
+# with INFO 61-63, `:User_Supplied_Function_Undefined`). Only a `DomainError`
+# (sqrt or log of a negative number, ...) is treated this way. Every other
+# error, including `InterruptException` (Ctrl-C), uses Status = -2, which stops
+# SNOPT immediately; `solve_snopt` then rethrows the error. Only a `DomainError`
+# thrown directly counts: one wrapped in another exception (for example a
+# `TaskFailedException` from a task spawned in `fitness`) stops the solve.
+snopt_callback_status(err) = err isa DomainError ? Cint(-1) : Cint(-2)
 
 function snopt_bound(x)
     v = Float64(x)
@@ -520,10 +576,17 @@ function snopta_usrfun_trampoline(
 )::Cvoid
     try
         cb = _SNOPT_USRFUN[]
-        cb !== nothing && cb(status_, n_, x_, needF_, neF_, F_, needG_, neG_, G_)
+        cb === nothing && error("NLPInterface: SNOPT called back with no active solve")
+        cb(status_, n_, x_, needF_, neF_, F_, needG_, neG_, G_)
     catch err
-        _SNOPT_CALLBACK_ERROR[] = err
-        unsafe_store!(status_, Cint(-1))
+        status = snopt_callback_status(err)
+        if status <= -2
+            # Keep the first error: SNOPT stops after this callback returns.
+            _SNOPT_CALLBACK_ERROR[] === nothing && (_SNOPT_CALLBACK_ERROR[] = err)
+        else
+            _SNOPT_LAST_DOMAIN_ERROR[] = err
+        end
+        unsafe_store!(status_, status)
     end
     return
 end
@@ -562,8 +625,25 @@ evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
 `Print_file` and `Summary_file` must name different files; two names for one
 file throw an `ArgumentError`.
 
+If `fitness` throws a `DomainError`, SNOPT treats the functions as undefined at
+that point and shortens the step; the error is not rethrown. If SNOPT cannot
+recover, it ends with a failure status, usually
+`:User_Supplied_Function_Undefined` (then the last `DomainError` is shown in a
+warning). Any other exception, including `InterruptException` (Ctrl-C) and a
+`DomainError` wrapped in another exception, stops SNOPT at once and is rethrown
+by `solve_snopt`.
+
+Only one SNOPT solve runs at a time. Calling `solve_snopt` from inside
+`fitness` (or, on Julia 1.11 and later, from a task spawned there while the
+solve runs) throws an error, since SNOPT's C interface keeps global state.
+Handing the call to a task that existed before the solve deadlocks.
+
+`fitness` must not keep a reference to `x`: the array is reused between calls
+(copy it to keep it).
+
 Returns `(xopt, fopt, info)`. `info` is a symbol from
-`NLPInterface.SNOPT_RETURN_STATUS`. `:Solve_Succeeded`,
+`NLPInterface.SNOPT_RETURN_STATUS`. `fopt` is `NaN` if no evaluation of
+`fitness` requested by SNOPT completed. `:Solve_Succeeded`,
 `:Solved_To_Acceptable_Level`, and `:Feasible_Point_Found` (only with the
 `Feasible point` option) mean SNOPT returned a feasible point.
 `:Elastic_Objective_Minimized` and `:Elastic_Infeasibilities_Minimized` end the
@@ -581,6 +661,7 @@ function solve_snopt(
     kwargs...,
 )
     require_snopt()
+    check_snopt_not_nested()
     n = length(x0)
     if n == 0
         throw(ArgumentError("x0 must be non-empty"))
@@ -624,6 +705,13 @@ function solve_snopt(
     xmul = zeros(Float64, n)
     Fmul = zeros(Float64, nF)
 
+    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv)
+    r_buf = zeros(Float64, nF)
+    J_buf = zeros(Float64, nF, n)
+    # Set once `fitness` has returned a value. Until then `F` holds only the
+    # zeros it was initialized with, which must not be reported as `fopt`.
+    f_evaluated = Ref(false)
+
     function usrfun(
         status_::Ptr{Cint},
         n_::Ptr{Cint},
@@ -639,14 +727,20 @@ function solve_snopt(
         status >= 2 && return
         nx = Int(unsafe_load(n_))
         xv = unsafe_wrap(Array, x_, nx)
-        if unsafe_load(needF_) > 0
-            Ff = unsafe_wrap(Array, F_, Int(unsafe_load(neF_)))
-            Ff .= packed_residual(fitness, xv, n_ceq, n_cineq)
-        end
-        if unsafe_load(needG_) > 0
+        needF = unsafe_load(needF_) > 0
+        needG = unsafe_load(needG_) > 0
+        if needG
+            # One pass gives both the value and the Jacobian (see ResidualEvaluator).
+            residual_value_and_jacobian!(evaluator, r_buf, J_buf, xv, false)
             Gg = unsafe_wrap(Array, G_, Int(unsafe_load(neG_)))
-            J = jacobian_residual(fitness, xv, n_ceq, n_cineq, deriv)
-            Gg .= vec(J)
+            Gg .= vec(J_buf)
+        elseif needF
+            residual_value!(evaluator, r_buf, xv)
+        end
+        if needF
+            Ff = unsafe_wrap(Array, F_, Int(unsafe_load(neF_)))
+            Ff .= r_buf
+            f_evaluated[] = true
         end
         return
     end
@@ -703,124 +797,137 @@ function solve_snopt(
     )
 
     return lock(SNOPT_LOCK) do
-        _SNOPT_USRFUN[] = usrfun
-        _SNOPT_CALLBACK_ERROR[] = nothing
-        try
-            snopt_init_workspace!(printpath, summpath, cw, iw, rw)
-            initialized[] = true
+        _with_snopt_in_solve() do
+            _SNOPT_USRFUN[] = usrfun
+            _SNOPT_CALLBACK_ERROR[] = nothing
+            _SNOPT_LAST_DOMAIN_ERROR[] = nothing
+            try
+                snopt_init_workspace!(printpath, summpath, cw, iw, rw)
+                initialized[] = true
 
-            meminfo = Ref{Cint}(0)
-            ccall(
-                (:f_snmema, libsnopt7),
-                Cvoid,
-                (
-                    Ptr{Cint}, Cint, Cint, Cint, Cint, Ptr{Cint}, Ptr{Cint},
-                    Ptr{Cint}, Cint, Ptr{Cdouble}, Cint,
-                ),
-                meminfo,
-                nF,
-                n,
-                neA,
-                neG,
-                miniw,
-                minrw,
-                iw,
-                length(iw),
-                rw,
-                length(rw),
-            )
-            if Int(miniw[]) > length(iw)
-                resize!(iw, Int(miniw[]))
-                snopt_set_option!(iw, length(iw), rw, length(rw), "Total integer workspace", length(iw))
-            end
-            if Int(minrw[]) > length(rw)
-                resize!(rw, Int(minrw[]))
-                snopt_set_option!(iw, length(iw), rw, length(rw), "Total real workspace", length(rw))
-            end
-
-            for (key, val) in solver_kwargs
-                apply_snopt_option!(iw, length(iw), rw, length(rw), key, val)
-            end
-
-            GC.@preserve usrfun F x xlow xupp Flow Fupp xstate Fstate xmul Fmul iAfun jAvar Aval iGfun jGvar iw rw cw iu ru begin
+                meminfo = Ref{Cint}(0)
                 ccall(
-                    (:f_snopta, libsnopt7),
+                    (:f_snmema, libsnopt7),
                     Cvoid,
                     (
-                        Cint, Cstring,
-                        Cint, Cint, Cdouble, Cint,
-                        Ptr{Cvoid},
-                        Ptr{Cint}, Ptr{Cint}, Cint, Ptr{Cdouble},
-                        Ptr{Cint}, Ptr{Cint}, Cint,
-                        Ptr{Cdouble}, Ptr{Cdouble},
-                        Ptr{Cdouble}, Ptr{Cdouble},
-                        Ptr{Cdouble}, Ptr{Cint}, Ptr{Cdouble},
-                        Ptr{Cdouble}, Ptr{Cint}, Ptr{Cdouble},
-                        Ptr{Cint}, Ptr{Cint}, Ptr{Cint}, Ptr{Cdouble},
-                        Ptr{Cint}, Ptr{Cint},
-                        Ptr{Cint}, Cint, Ptr{Cdouble}, Cint,
+                        Ptr{Cint}, Cint, Cint, Cint, Cint, Ptr{Cint}, Ptr{Cint},
                         Ptr{Cint}, Cint, Ptr{Cdouble}, Cint,
                     ),
-                    Cint(0),
-                    "NLPIntf",
+                    meminfo,
                     nF,
                     n,
-                    0.0,
-                    1,
-                    usr_callback,
-                    iAfun,
-                    jAvar,
                     neA,
-                    Aval,
-                    iGfun,
-                    jGvar,
                     neG,
-                    xlow,
-                    xupp,
-                    Flow,
-                    Fupp,
-                    x,
-                    xstate,
-                    xmul,
-                    F,
-                    Fstate,
-                    Fmul,
-                    inform,
-                    nS,
-                    nInf,
-                    sInf,
                     miniw,
                     minrw,
-                    iu,
-                    length(iu),
-                    ru,
-                    length(ru),
                     iw,
                     length(iw),
                     rw,
                     length(rw),
                 )
-            end
-            if _SNOPT_CALLBACK_ERROR[] !== nothing
-                err = _SNOPT_CALLBACK_ERROR[]
+                if Int(miniw[]) > length(iw)
+                    resize!(iw, Int(miniw[]))
+                    snopt_set_option!(iw, length(iw), rw, length(rw), "Total integer workspace", length(iw))
+                end
+                if Int(minrw[]) > length(rw)
+                    resize!(rw, Int(minrw[]))
+                    snopt_set_option!(iw, length(iw), rw, length(rw), "Total real workspace", length(rw))
+                end
+
+                for (key, val) in solver_kwargs
+                    apply_snopt_option!(iw, length(iw), rw, length(rw), key, val)
+                end
+
+                GC.@preserve usrfun F x xlow xupp Flow Fupp xstate Fstate xmul Fmul iAfun jAvar Aval iGfun jGvar iw rw cw iu ru begin
+                    ccall(
+                        (:f_snopta, libsnopt7),
+                        Cvoid,
+                        (
+                            Cint, Cstring,
+                            Cint, Cint, Cdouble, Cint,
+                            Ptr{Cvoid},
+                            Ptr{Cint}, Ptr{Cint}, Cint, Ptr{Cdouble},
+                            Ptr{Cint}, Ptr{Cint}, Cint,
+                            Ptr{Cdouble}, Ptr{Cdouble},
+                            Ptr{Cdouble}, Ptr{Cdouble},
+                            Ptr{Cdouble}, Ptr{Cint}, Ptr{Cdouble},
+                            Ptr{Cdouble}, Ptr{Cint}, Ptr{Cdouble},
+                            Ptr{Cint}, Ptr{Cint}, Ptr{Cint}, Ptr{Cdouble},
+                            Ptr{Cint}, Ptr{Cint},
+                            Ptr{Cint}, Cint, Ptr{Cdouble}, Cint,
+                            Ptr{Cint}, Cint, Ptr{Cdouble}, Cint,
+                        ),
+                        Cint(0),
+                        "NLPIntf",
+                        nF,
+                        n,
+                        0.0,
+                        1,
+                        usr_callback,
+                        iAfun,
+                        jAvar,
+                        neA,
+                        Aval,
+                        iGfun,
+                        jGvar,
+                        neG,
+                        xlow,
+                        xupp,
+                        Flow,
+                        Fupp,
+                        x,
+                        xstate,
+                        xmul,
+                        F,
+                        Fstate,
+                        Fmul,
+                        inform,
+                        nS,
+                        nInf,
+                        sInf,
+                        miniw,
+                        minrw,
+                        iu,
+                        length(iu),
+                        ru,
+                        length(ru),
+                        iw,
+                        length(iw),
+                        rw,
+                        length(rw),
+                    )
+                end
+                if _SNOPT_CALLBACK_ERROR[] !== nothing
+                    err = _SNOPT_CALLBACK_ERROR[]
+                    _SNOPT_CALLBACK_ERROR[] = nothing
+                    throw(err)
+                end
+                status = Int(inform[])
+                info = get(SNOPT_RETURN_STATUS, status, :Unknown)
+                domain_err = _SNOPT_LAST_DOMAIN_ERROR[]
+                if domain_err !== nothing && 61 <= status <= 63
+                    @warn "SNOPT stopped at a point where fitness is undefined (INFO $status); " *
+                          "the last DomainError thrown by fitness was:" exception = domain_err
+                end
+                # NaN if no `fitness` evaluation requested by SNOPT completed (e.g.
+                # INFO 91, or INFO 61 when `fitness` is undefined at `x0`).
+                fopt = f_evaluated[] ? F[1] : NaN
+                return copy(x), fopt, info
+            finally
+                _SNOPT_USRFUN[] = nothing
                 _SNOPT_CALLBACK_ERROR[] = nothing
-                throw(err)
-            end
-            status = Int(inform[])
-            info = get(SNOPT_RETURN_STATUS, status, :Unknown)
-            return copy(x), F[1], info
-        finally
-            _SNOPT_USRFUN[] = nothing
-            if initialized[]
-                ccall(
-                    (:f_snend, libsnopt7),
-                    Cvoid,
-                    (Ptr{Cint}, Cint, Ptr{Cdouble}, Cint),
-                    iw,
-                    length(iw),
-                    rw,
-                    length(rw),
-                )
+                _SNOPT_LAST_DOMAIN_ERROR[] = nothing
+                if initialized[]
+                    ccall(
+                        (:f_snend, libsnopt7),
+                        Cvoid,
+                        (Ptr{Cint}, Cint, Ptr{Cdouble}, Cint),
+                        iw,
+                        length(iw),
+                        rw,
+                        length(rw),
+                    )
+                end
             end
         end
     end
