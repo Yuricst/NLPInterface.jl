@@ -7,6 +7,9 @@
   <a href="https://yuricst.github.io/NLPInterface.jl">
     <img src="https://github.com/Yuricst/NLPInterface.jl/actions/workflows/docs.yml/badge.svg" alt="docs workflow"/>
   </a>
+  <a href="https://app.codecov.io/gh/Yuricst/NLPInterface.jl">
+    <img src="https://codecov.io/gh/Yuricst/NLPInterface.jl/branch/main/graph/badge.svg" alt="codecov"/>
+  </a>
 </p>
 
 Nonlinear programming (NLP) interface for gradient-based solvers [SNOPT](https://ccom.ucsd.edu/~optimizers/docs/snopt/introduction.html) and [Ipopt](https://github.com/coin-or/ipopt) in Julia.
