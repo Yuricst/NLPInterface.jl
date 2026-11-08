@@ -1,9 +1,9 @@
-using GLMakie
+using CairoMakie
 using NLPInterface
 
 include(joinpath(@__DIR__, "..", "test", "problems.jl"))
 
-solver = "ipopt"    # "snopt" or "ipopt"
+solver = "snopt"    # "snopt" or "ipopt"
 
 p = problems["rosenbrock"]
 

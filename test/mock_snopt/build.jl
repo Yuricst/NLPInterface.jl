@@ -1,5 +1,5 @@
 # Build the mock SNOPT libraries (mock_core.c, mock_wrapper.c) with the system
-# C compiler. Used by test/runtests.jl; see test/mock_snopt/runtests_mock.jl.
+# C compiler. Used by test/test_mock_snopt.jl; see test/mock_snopt/runtests_mock.jl.
 
 using Libdl
 
