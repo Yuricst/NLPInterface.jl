@@ -163,19 +163,23 @@ include("problems.jl")
 
     @testset "fitness evaluation counts" begin
         # Wrap `fitness` to record every point it is called at, split into plain
-        # (Float64) and Dual (ForwardDiff) calls.
+        # (Float64) and Dual (ForwardDiff) calls. `events` keeps the call order as
+        # `(is_dual, x)` pairs.
         function counted(f)
             plain = Vector{Vector{Float64}}()
             dual = Vector{Vector{Float64}}()
+            events = Tuple{Bool,Vector{Float64}}[]
             g = function (x)
                 if eltype(x) <: ForwardDiff.Dual
                     push!(dual, ForwardDiff.value.(x))
+                    push!(events, (true, dual[end]))
                 else
                     push!(plain, collect(Float64, x))
+                    push!(events, (false, plain[end]))
                 end
                 return f(x)
             end
-            return g, plain, dual
+            return g, plain, dual, events
         end
         p = problems["rosenbrock"]
         n = length(p.x0)
@@ -201,15 +205,22 @@ include("problems.jl")
             end
         end
 
-        # Ipopt: no point is evaluated twice in the same mode, and trial points
-        # that only need f or g do not get a Jacobian.
+        # Ipopt: the cache answers repeated requests at the same point, so two
+        # consecutive calls are never at the same `x`, except a plain call followed
+        # by the Dual call for its Jacobian. Trial points that only need f or g do
+        # not get a Jacobian. (Ipopt may come back to an earlier point after
+        # visiting another one, e.g. after a second-order correction, and that
+        # point is evaluated again, so `allunique` would depend on the
+        # floating-point path of the line search and differs between platforms.)
         for deriv in (:forwarddiff, :finitediff)
-            g, plain, dual = counted(p.fitness)
+            g, plain, dual, events = counted(p.fitness)
             xopt, _, info = solve_ipopt(g, p.x0, p.x_lb, p.x_ub, p.n_ceq, p.n_cineq;
                                         deriv=deriv, print_level=0)
             @test info === :Solve_Succeeded
-            @test allunique(plain)
-            @test allunique(dual)
+            @test all(2:length(events)) do i
+                (dual1, x1), (dual2, x2) = events[i - 1], events[i]
+                x1 != x2 || (!dual1 && dual2)
+            end
             if deriv === :forwarddiff
                 @test length(dual) < length(plain)
             end
