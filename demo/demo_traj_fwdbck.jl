@@ -86,29 +86,29 @@ end
 
 # solve NLP
 x0 = [[0.0, π]; rand(4*nseg)] #ones(3*nseg); umax * ones(nseg)]
-xopt, fopt, info = solve_snopt(
-    fitness,
-    x0,
-    x_lb,
-    x_ub,
-    n_ceq,
-    n_cineq;
-    Major_print_level=1,
-    Major_feasibility_tolerance=1e-8,
-    Major_optimality_tolerance=1e-6,
-    Major_iterations=200
-)
-# xopt, fopt, info = solve_ipopt(
+# xopt, fopt, info = solve_snopt(
 #     fitness,
 #     x0,
 #     x_lb,
 #     x_ub,
 #     n_ceq,
 #     n_cineq;
-#     print_level=5,
-#     tol=1e-6,
-#     constr_viol_tol=1e-8,
+#     Major_print_level=1,
+#     Major_feasibility_tolerance=1e-8,
+#     Major_optimality_tolerance=1e-6,
+#     Major_iterations=200
 # )
+xopt, fopt, info = solve_ipopt(
+    fitness,
+    x0,
+    x_lb,
+    x_ub,
+    n_ceq,
+    n_cineq;
+    print_level=5,
+    tol=1e-6,
+    constr_viol_tol=1e-8,
+)
 uopt = reshape(xopt[3:end], nseg, 4)
 
 # reconstruct solved trajectory
