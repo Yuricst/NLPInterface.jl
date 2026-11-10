@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  <a href="https://yuricst.github.io/NLPInterface.jl/">
-    <img src="https://github.com/Yuricst/NLPInterface.jl/actions/workflows/test.yml/badge.svg" alt="test workflow"/>
-  </a>
   <a href="https://yuricst.github.io/NLPInterface.jl">
     <img src="https://github.com/Yuricst/NLPInterface.jl/actions/workflows/docs.yml/badge.svg" alt="docs workflow"/>
+  </a>
+  <a href="https://yuricst.github.io/NLPInterface.jl/">
+    <img src="https://github.com/Yuricst/NLPInterface.jl/actions/workflows/test.yml/badge.svg" alt="test workflow"/>
   </a>
   <a href="https://app.codecov.io/gh/Yuricst/NLPInterface.jl">
     <img src="https://codecov.io/gh/Yuricst/NLPInterface.jl/branch/main/graph/badge.svg" alt="codecov"/>
