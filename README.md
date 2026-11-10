@@ -1,4 +1,6 @@
-# NLPInterface.jl
+<p align="center">
+  <img src="docs/src/assets/logo.png" alt="NLPInterface.jl Logo" width="70%"/>
+</p>
 
 <p align="center">
   <a href="https://yuricst.github.io/NLPInterface.jl/">
