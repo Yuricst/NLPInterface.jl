@@ -116,7 +116,7 @@ function jacobian_residual(fitness, x, n_ceq, n_cineq, deriv::Symbol)
 end
 
 """
-    ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv)
+    ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv; x_lb, x_ub)
 
 Evaluate the packed residual `[obj; ceq; cineq]` and its Jacobian with as few
 `fitness` calls as possible. Built once per solve, so the ForwardDiff
@@ -124,26 +124,40 @@ configuration and result buffers are reused at every point.
 
 - `:forwarddiff`: the value and the Jacobian come from the same Dual
   evaluation(s), so no separate plain call is needed.
-- `:finitediff` (forward differences): the value at `x` is reused as the base
+- `:finitediff` (one-sided differences): the value at `x` is reused as the base
   point, so a Jacobian costs `n` calls when the value is already known and
-  `n + 1` otherwise.
+  `n + 1` otherwise. Each step stays inside `[x_lb, x_ub]` where possible: it
+  goes forward unless that would cross `x_ub[j]`, then backward.
+
+`fitness` never receives the solver's own `x` array: plain calls get a copy in
+a buffer owned by the evaluator, so a `fitness` that modifies its argument
+cannot corrupt the solver's iterate.
 """
 struct ResidualEvaluator{F,C,R}
     residual::F
     deriv::Symbol
     cfg::C      # ForwardDiff.JacobianConfig, or `nothing` for :finitediff
     result::R   # DiffResults.DiffResult, or `nothing` for :finitediff
+    x_lb::Vector{Float64}
+    x_ub::Vector{Float64}
+    xbuf::Vector{Float64}   # the `x` handed to plain `fitness` calls
 end
 
-function ResidualEvaluator(fitness, n::Integer, n_ceq::Integer, n_cineq::Integer, deriv::Symbol)
+function ResidualEvaluator(
+    fitness, n::Integer, n_ceq::Integer, n_cineq::Integer, deriv::Symbol;
+    x_lb=fill(-Inf, n), x_ub=fill(Inf, n),
+)
     residual = ξ -> packed_residual(fitness, ξ, n_ceq, n_cineq)
+    lb = convert(Vector{Float64}, x_lb)
+    ub = convert(Vector{Float64}, x_ub)
+    xbuf = zeros(Float64, n)
     if deriv === :forwarddiff
         xs = zeros(Float64, n)
         cfg = ForwardDiff.JacobianConfig(residual, xs)
         result = DiffResults.JacobianResult(zeros(Float64, 1 + n_ceq + n_cineq), xs)
-        return ResidualEvaluator(residual, deriv, cfg, result)
+        return ResidualEvaluator(residual, deriv, cfg, result, lb, ub, xbuf)
     elseif deriv === :finitediff
-        return ResidualEvaluator(residual, deriv, nothing, nothing)
+        return ResidualEvaluator(residual, deriv, nothing, nothing, lb, ub, xbuf)
     else
         throw(ArgumentError("Unknown deriv=$deriv; use :forwarddiff or :finitediff"))
     end
@@ -152,11 +166,28 @@ end
 """
     residual_value!(ev, r, x)
 
-Store the packed residual at `x` in `r` (one plain `fitness` call).
+Store the packed residual at `x` in `r` (one plain `fitness` call, on a copy of `x`).
 """
 function residual_value!(ev::ResidualEvaluator, r, x)
-    r .= ev.residual(x)
+    copyto!(ev.xbuf, x)
+    r .= ev.residual(ev.xbuf)
     return r
+end
+
+# Step for column `j` of a one-sided difference at `xj`: `+h` unless that crosses
+# the upper bound, then `-h` if that stays above the lower bound; if neither
+# fits (bounds closer than `h`), step towards the wider side. Returns the step
+# actually taken after rounding, so that the quotient uses the exact difference.
+function fd_step(xj, lb, ub)
+    h = sqrt(eps(Float64)) * max(1.0, abs(xj))
+    if xj + h <= ub
+        s = h
+    elseif xj - h >= lb
+        s = -h
+    else
+        s = (ub - xj >= xj - lb) ? h : -h
+    end
+    return (xj + s) - xj
 end
 
 """
@@ -168,15 +199,22 @@ at `x` is computed as part of the Jacobian evaluation and stored in `r`.
 """
 function residual_value_and_jacobian!(ev::ResidualEvaluator, r, J, x, r_valid::Bool)
     if ev.deriv === :forwarddiff
+        # ForwardDiff copies `x` into its own Dual buffer; `fitness` never sees `x`.
         result = ForwardDiff.jacobian!(ev.result, ev.residual, x, ev.cfg)
         r_valid || (r .= DiffResults.value(result))
         J .= DiffResults.jacobian(result)
     else
         r_valid || residual_value!(ev, r, x)
-        # Same call as `jacobian_residual`, but with the known base value.
-        J .= FiniteDiff.finite_difference_jacobian(
-            ev.residual, x, Val(:forward), eltype(x), copy(r),
-        )
+        xt = ev.xbuf
+        for j in eachindex(x)
+            copyto!(xt, x)   # undo anything `fitness` did to `xt` last time
+            s = fd_step(x[j], ev.x_lb[j], ev.x_ub[j])
+            xt[j] = x[j] + s
+            rj = ev.residual(xt)
+            for i in eachindex(r)
+                J[i, j] = (rj[i] - r[i]) / s
+            end
+        end
     end
     return J
 end
