@@ -1,6 +1,6 @@
 # TODO
 
-State as of 2026-11-11 (`main` at 061b18c).
+State as of 2026-11-11 (`main` at ace86bf).
 
 ## Done
 
@@ -16,9 +16,6 @@ State as of 2026-11-11 (`main` at 061b18c).
 ## Open
 
 - **Sparse Jacobian support** (issue #6, branch `6-support-for-sparse-jacobian`). The branch has no commits beyond `main` yet, and both solvers still pass a dense Jacobian.
-- **Julia compat lower bound.** `Project.toml` now declares `julia = "1"` (was `"1.10"`). With `Ipopt = "1"`, the resolver's effective floor is Julia 1.6 (Ipopt.jl 1.0–1.9). CI only tests `lts` (1.10, including the downgrade job) and the latest release, so Julia 1.6–1.9 are untested. Either test them in CI or restore `julia = "1.10"`.
-- **Leftover `FiniteDiff` dependency.** The solvers no longer use FiniteDiff. Its only use is `jacobian_residual(...; :finitediff)` in `src/residuals.jl`, which `test/test_residuals.jl` calls and which is not bound-aware. Consider removing it, or moving it to the test target, and dropping the dependency.
-- **Typo in directory name.** The benchmark directory is named `bechmark/`.
 
 ## Known limitations (cannot be removed in this package)
 
