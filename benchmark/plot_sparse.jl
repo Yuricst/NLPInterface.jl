@@ -52,7 +52,7 @@ function panel_figure(file, rows_csv, panel_rows, panel_cols; title, ylabel, sel
             sort!(rs; by=r -> parse(Int, r["n"]))
             xs = [parse(Int, r["n"]) for r in rs]
             ys = [value(r, pr) for r in rs]
-            keep = isfinite.(ys) .& (ys .> 0)
+            keep = isfinite.(ys) .& (ys .> 0)   # 0 (not measurable) has no place on a log scale
             scatterlines!(ax, xs[keep], ys[keep]; color=st.color, marker=st.marker,
                 markersize=9, linewidth=2, label=st.label)
         end
@@ -74,10 +74,10 @@ function plot_sparse(;
     solvers = filter(s -> any(r -> r["solver"] == s, res), ["snopt", "ipopt"])
 
     panel_figure(joinpath(assets, "sparse_cpu_time.png"), res, ["forwarddiff", "finitediff"], solvers;
-        title="CPU time per solve (mean of $(res[1]["M"]) solves)",
+        title="CPU time per solve (median of $(res[1]["M"]) solves)",
         ylabel=_ -> "CPU time [s]",
         select=(r, deriv, solver) -> r["deriv"] == deriv && r["solver"] == solver,
-        value=(r, _) -> parse(Float64, r["cpu_mean_s"]),
+        value=(r, _) -> parse(Float64, r["cpu_median_s"]),
         panel_title=(deriv, solver) -> "$(SOLVER_NAME[solver]), deriv = :$deriv")
 
     # Memory: Julia allocations from the timing run, peak RSS from the RSS run.

@@ -32,7 +32,9 @@ on a scalable collocation problem; see the Sparse Jacobian page of the
 documentation (`docs/src/sparse_jac.md`) for the protocol and results.
 
 ```sh
-julia benchmark/sparse_jacobian.jl
+julia benchmark/sparse_jacobian.jl        # CPU time, fitness calls, allocations -> sparse_results.csv
+julia benchmark/sparse_jacobian_rss.jl    # peak RSS, Linux only -> sparse_rss.csv
+julia benchmark/plot_sparse.jl            # redraw docs/src/assets/sparse_*.png from both CSVs
 ```
 
 ## Protocol
