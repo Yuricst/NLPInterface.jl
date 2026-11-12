@@ -50,6 +50,10 @@ end
     Z = sparse([1, 2], [1, 2], [1.0, 0.0], 2, 2)
     @test JP(Z, 2, 2).rows == [1, 2]
     @test JP(Matrix(Z), 2, 2).rows == [1]
+    # ... also through a transpose, an adjoint, or a view of a sparse matrix.
+    for W in (transpose(sparse(transpose(Z))), adjoint(sparse(adjoint(Z))), view(Z, :, :))
+        @test JP(W, 2, 2).rows == [1, 2]
+    end
     # Size and element type are checked.
     @test_throws ArgumentError JP(S, 3, 4)
     @test_throws ArgumentError JP(S', 4, 3)
@@ -135,6 +139,12 @@ end
     @test all(ξ -> all(lb .<= ξ .<= ub), seen)
     @test J ≈ Jd rtol = 1e-5
 
+    # A non-Float64 `x` is converted.
+    for deriv in (:forwarddiff, :finitediff)
+        _, J, _, _ = sparse_jac(f, Jref .!= 0, collect(1:n), n - 1, 0, deriv)
+        @test J ≈ NLPInterface.jacobian_residual(f, collect(1.0:n), n - 1, 0, :forwarddiff) rtol = 1e-6
+    end
+
     # Empty pattern: no derivative work, the value is still computed.
     f0 = x -> (1.0, [2.0], nothing)
     for deriv in (:forwarddiff, :finitediff)
@@ -162,6 +172,109 @@ end
     @test detect_jac_sparsity(fb, [1.0, 2.0, 3.0], 1, 0; detector=TracerLocalSparsityDetector()) ==
           sparse([1, 2, 2], [1, 1, 3], true, 2, 3)
     @test_throws ArgumentError detect_jac_sparsity(fb, [1.0, 2.0, 3.0], 1, 0; detector=:tracer)
-    # Wrong constraint counts are reported as usual.
+    # Errors from the checks of the fitness output pass through unchanged.
     @test_throws DimensionMismatch detect_jac_sparsity(P.fitness, P.x0, P.n_ceq - 1, P.n_cineq)
+    @test_throws ArgumentError("fitness must return a real scalar objective; got String") detect_jac_sparsity(
+        x -> ("a", nothing, nothing), [1.0, 2.0], 0, 0)
+    # A detector's stored zeros stay in the pattern.
+    Z = sparse([1, 2, 2], [1, 1, 2], [1.0, 0.0, 1.0], 2, 2)
+    known = NLPInterface.ADTypes.KnownJacobianSparsityDetector(Z)
+    @test detect_jac_sparsity(x -> (x[1], [x[2]], nothing), [1.0, 2.0], 1, 0; detector=known) ==
+          sparse([1, 2, 2], [1, 1, 2], true, 2, 2)
+end
+
+# The solvers with `jac_sparsity`: same optimum as dense, fewer `fitness` calls.
+sparse_solvers() = has_snopt() ? (:ipopt, :snopt) : (:ipopt,)
+function solve_with(solver, f, args...; kw...)
+    if solver === :ipopt
+        return solve_ipopt(f, args...; print_level=0, tol=1e-9, kw...)
+    else
+        return solve_snopt(f, args...; kw...)
+    end
+end
+
+@testset "jac_sparsity: $solver" for solver in sparse_solvers()
+    P = transcription_problem(10)
+    args = (P.x0, P.x_lb, P.x_ub, P.n_ceq, P.n_cineq)
+    for deriv in (:forwarddiff, :finitediff)
+        # A sparse G changes SNOPT's view of the problem (only e_N is a
+        # nonlinear objective variable), so its iterates differ from the dense
+        # run and both stop within the default tolerance (1e-6) of the optimum.
+        xtol = solver === :snopt ? 1e-4 : 1e-5
+        ncalls = Ref(0)   # `counted` cannot take the tracer inputs of `:auto`
+        g = x -> (ncalls[] += 1; P.fitness(x))
+        xd, fd, infod = solve_with(solver, g, args...; deriv=deriv)
+        ncalls_dense = ncalls[]
+        @test infod === :Solve_Succeeded
+        for sp in (P.pattern, Matrix(P.pattern), :auto, TracerSparsityDetector())
+            ncalls[] = 0
+            xs, fs, infos = solve_with(solver, g, args...; deriv=deriv, jac_sparsity=sp)
+            @test infos === :Solve_Succeeded
+            @test xs ≈ xd atol = xtol
+            @test fs ≈ fd rtol = 1e-6
+            @test fs == P.fitness(xs)[1]
+            @test ncalls[] < ncalls_dense ÷ 2
+        end
+    end
+
+    # Small test problems with a full pattern: same as dense.
+    for name in ("hs071", "rosenbrock", "g06")
+        q = problems[name]
+        qargs = (q.x0, q.x_lb, q.x_ub, q.n_ceq, q.n_cineq)
+        full = trues(1 + q.n_ceq + q.n_cineq, length(q.x0))
+        xd, _, _ = solve_with(solver, q.fitness, qargs...)
+        xs, _, info = solve_with(solver, q.fitness, qargs...; jac_sparsity=full)
+        @test info in (:Solve_Succeeded, :Solved_To_Acceptable_Level)
+        @test xs ≈ xd atol = 1e-6
+    end
+
+    # No constraints; an unused variable (empty column); a constant constraint
+    # (empty row; Ipopt needs a placeholder entry); an empty pattern.
+    for deriv in (:forwarddiff, :finitediff)
+        f = x -> ((x[1] - 0.3)^2 + (x[2] + 0.2)^2, nothing, nothing)
+        xs, _, info = solve_with(solver, f, [0.5, 0.5, 0.5], fill(-1.0, 3), ones(3), 0, 0;
+            deriv=deriv, jac_sparsity=sparse([1, 1], [1, 2], true, 1, 3))
+        @test info === :Solve_Succeeded
+        @test xs[1:2] ≈ [0.3, -0.2] atol = 1e-6   # x[3] is free (Ipopt's barrier moves it)
+        f = x -> ((x[1] - 0.3)^2, nothing, [-1.0])
+        xs, fs, info = solve_with(solver, f, [0.5, 0.5], zeros(2), ones(2), 0, 1;
+            deriv=deriv, jac_sparsity=sparse([1], [1], true, 2, 2))
+        @test info === :Solve_Succeeded
+        @test xs ≈ [0.3, 0.5] atol = 1e-6
+        f = x -> (1.0, nothing, nothing)
+        xs, fs, info = solve_with(solver, f, [0.5, 0.5], zeros(2), ones(2), 0, 0;
+            deriv=deriv, jac_sparsity=spzeros(Bool, 1, 2))
+        @test info === :Solve_Succeeded
+        @test fs == 1.0
+    end
+
+    # Bad `jac_sparsity` values are rejected before `fitness` is called.
+    g, plain, dual = counted(P.fitness)
+    for bad in (trues(2, 2), :bogus, "auto", 1.0, (P.pattern,))
+        @test_throws ArgumentError solve_with(solver, g, args...; jac_sparsity=bad)
+    end
+    @test isempty(plain) && isempty(dual)
+
+    # Exceptions in `fitness` on the sparse path are rethrown after the solve.
+    for deriv in (:forwarddiff, :finitediff)
+        n = Ref(0)
+        f = x -> ((n[] += 1) == 6 ? error("boom") : P.fitness(x))
+        @test_throws ErrorException("boom") solve_with(solver, f, args...; deriv=deriv, jac_sparsity=P.pattern)
+    end
+end
+
+@testset "jac_sparsity=:auto without SparseConnectivityTracer" begin
+    # A fresh process that does not load SparseConnectivityTracer.
+    code = """
+        using NLPInterface
+        f = x -> (x[1]^2, nothing, nothing)
+        try
+            solve_ipopt(f, [1.0], [-2.0], [2.0], 0, 0; jac_sparsity=:auto, print_level=0)
+            print("no error")
+        catch err
+            print(err isa ArgumentError && occursin("using SparseConnectivityTracer", err.msg))
+        end
+        """
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
+    @test read(cmd, String) == "true"
 end

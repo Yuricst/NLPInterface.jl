@@ -866,6 +866,17 @@ function dense_jacobian_pattern(nF::Int, n::Int)
     return iGfun, jGvar, neG
 end
 
+# SNOPT's G arrays for the packed Jacobian: dense, or the pattern entries.
+snopt_jacobian_pattern(::Nothing, nF::Int, n::Int) = dense_jacobian_pattern(nF, n)
+function snopt_jacobian_pattern(p::JacobianPattern, nF::Int, n::Int)
+    neG = SparseArrays.nnz(p)
+    iGfun = ones(Int32, max(neG, 1))
+    jGvar = ones(Int32, max(neG, 1))
+    iGfun[1:neG] .= p.rows
+    jGvar[1:neG] .= p.cols
+    return iGfun, jGvar, neG
+end
+
 """
     solve_snopt(fitness, x0, x_lb, x_ub, n_ceq, n_cineq; kwargs...)
 
@@ -886,6 +897,20 @@ are matched ignoring case, so `print_file` is the same as `Print_file`.
 
 The lengths of `ceq` and `cineq` must equal `n_ceq` and `n_cineq` at every
 evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
+
+`jac_sparsity` selects a sparse Jacobian (see the Sparse Jacobian page of the
+manual). `nothing` (default) uses a dense one. Otherwise it is one of:
+- a matrix of size `(1 + n_ceq + n_cineq, length(x0))` marking the entries of
+  the Jacobian of `[obj; ceq; cineq]` that can be nonzero (row 1 is the
+  objective). For a sparse matrix every stored entry counts, for any other
+  matrix every nonzero (`true`) entry;
+- `:auto`, to detect the pattern with [`detect_jac_sparsity`](@ref) (needs
+  `using SparseConnectivityTracer`);
+- an `ADTypes.AbstractSparsityDetector`, to detect it with that detector.
+
+Entries outside the pattern are taken to be zero and are never computed, so a
+pattern that misses a nonzero gives wrong derivatives. Columns that share no
+row are differentiated together, so a Jacobian costs fewer `fitness` calls.
 
 Bounds must satisfy `x_lb <= x_ub` and not be `NaN`, and `x0` must be
 non-empty and finite; otherwise an `ArgumentError` is thrown.
@@ -938,12 +963,14 @@ function solve_snopt(
     n_ceq::Integer,
     n_cineq::Integer;
     deriv::Symbol=:forwarddiff,
+    jac_sparsity=nothing,
     kwargs...,
 )
     require_snopt()
     check_snopt_not_nested()
     check_solver_inputs(x0, x_lb, x_ub, n_ceq, n_cineq, deriv)
     n = length(x0)
+    pattern = resolve_jac_sparsity(jac_sparsity, fitness, x0, n_ceq, n_cineq)
 
     # Always a fresh array: SNOPT writes the solution into `x` in place, and
     # `convert` would return the caller's `x0` itself when it is a Vector{Float64}.
@@ -962,7 +989,7 @@ function solve_snopt(
         Fupp[(2 + n_ceq):end] .= 0.0
     end
 
-    iGfun, jGvar, neG = dense_jacobian_pattern(nF, n)
+    iGfun, jGvar, neG = snopt_jacobian_pattern(pattern, nF, n)
     iAfun = Int32[1]
     jAvar = Int32[1]
     Aval = [0.0]
@@ -974,9 +1001,10 @@ function solve_snopt(
     xmul = zeros(Float64, n)
     Fmul = zeros(Float64, nF)
 
-    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv; x_lb=x_lb, x_ub=x_ub)
+    # `J_buf` is the dense nF × n Jacobian (column-major, the order of `iGfun`,
+    # `jGvar`), or the vector of pattern entries when `jac_sparsity` is given.
+    evaluator, J_buf = make_evaluator(fitness, pattern, n, n_ceq, n_cineq, deriv; x_lb=x_lb, x_ub=x_ub)
     r_buf = zeros(Float64, nF)
-    J_buf = zeros(Float64, nF, n)
     # Set once `fitness` has returned a value. Until then `F` holds only the
     # zeros it was initialized with, which must not be reported as `fopt`.
     f_evaluated = Ref(false)
@@ -1211,8 +1239,9 @@ function solve_snopt(
                 # INFO 91, or INFO 61 when `fitness` is undefined at `x0`). `F[1]`
                 # is not used: SNOPT may leave it at another point (its derivative
                 # check perturbs `x`), and with ForwardDiff it comes from a Dual
-                # evaluation.
-                fopt = if !f_evaluated[]
+                # evaluation. With an empty Jacobian pattern (`neG == 0`) SNOPT
+                # never calls `usrfun`, so `fopt` comes from a plain call.
+                fopt = if !f_evaluated[] && neG > 0
                     NaN
                 elseif isequal(x_plain, x)
                     f_plain[]

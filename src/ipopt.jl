@@ -107,6 +107,59 @@ function check_ipopt_options(kwargs)
     return nothing
 end
 
+# Gradient of the objective (row 1 of the packed Jacobian), dense or from the
+# pattern entries; entries outside the pattern are zero.
+objective_gradient!(g, J::AbstractMatrix, ::Nothing) = (g .= view(J, 1, :); g)
+function objective_gradient!(g, Jnz::AbstractVector, p::JacobianPattern)
+    g .= 0.0
+    for k in p.obj_entries
+        g[p.cols[k]] = Jnz[k]
+    end
+    return g
+end
+
+# Ipopt's Jacobian of the constraints: rows 2:(1 + m) of the packed Jacobian,
+# row-major when dense, in pattern order when sparse.
+function ipopt_jacobian_structure!(rows, cols, ::Nothing, m, n)
+    k = 1
+    for i in 1:m, j in 1:n
+        rows[k] = i
+        cols[k] = j
+        k += 1
+    end
+    return
+end
+# Ipopt needs at least one Jacobian entry when m > 0; a pattern without
+# constraint entries gets one at (1, 1), always zero.
+ipopt_nele_jac(::Nothing, m, n) = m * n
+ipopt_nele_jac(p::JacobianPattern, m, n) = m > 0 ? max(length(p.con_entries), 1) : 0
+function ipopt_jacobian_structure!(rows, cols, p::JacobianPattern, m, n)
+    if isempty(p.con_entries) && m > 0
+        rows[1] = 1
+        cols[1] = 1
+    end
+    for (idx, k) in enumerate(p.con_entries)
+        rows[idx] = p.rows[k] - 1
+        cols[idx] = p.cols[k]
+    end
+    return
+end
+function ipopt_jacobian_values!(values, J::AbstractMatrix, ::Nothing, m, n)
+    k = 1
+    for i in 1:m, j in 1:n
+        values[k] = J[i + 1, j]
+        k += 1
+    end
+    return
+end
+function ipopt_jacobian_values!(values, Jnz::AbstractVector, p::JacobianPattern, m, n)
+    isempty(p.con_entries) && m > 0 && (values[1] = 0.0)
+    for (idx, k) in enumerate(p.con_entries)
+        values[idx] = Jnz[k]
+    end
+    return
+end
+
 """
     solve_ipopt(fitness, x0, x_lb, x_ub, n_ceq, n_cineq; kwargs...)
 
@@ -122,6 +175,20 @@ one-sided differences that step backward where a forward step would cross
 value for a real-valued option (e.g. `tol=1`) is converted to `Float64`. The
 Hessian is always approximated with L-BFGS (`hessian_approximation =
 "limited-memory"`); any other `hessian_approximation` throws an `ArgumentError`.
+
+`jac_sparsity` selects a sparse Jacobian (see the Sparse Jacobian page of the
+manual). `nothing` (default) uses a dense one. Otherwise it is one of:
+- a matrix of size `(1 + n_ceq + n_cineq, length(x0))` marking the entries of
+  the Jacobian of `[obj; ceq; cineq]` that can be nonzero (row 1 is the
+  objective). For a sparse matrix every stored entry counts, for any other
+  matrix every nonzero (`true`) entry;
+- `:auto`, to detect the pattern with [`detect_jac_sparsity`](@ref) (needs
+  `using SparseConnectivityTracer`);
+- an `ADTypes.AbstractSparsityDetector`, to detect it with that detector.
+
+Entries outside the pattern are taken to be zero and are never computed, so a
+pattern that misses a nonzero gives wrong derivatives. Columns that share no
+row are differentiated together, so a Jacobian costs fewer `fitness` calls.
 
 Bounds must satisfy `x_lb <= x_ub` and not be `NaN`, and `x0` must be
 non-empty and finite; otherwise an `ArgumentError` is thrown.
@@ -154,11 +221,13 @@ function solve_ipopt(
     n_ceq::Integer,
     n_cineq::Integer;
     deriv::Symbol=:forwarddiff,
+    jac_sparsity=nothing,
     kwargs...,
 )
     check_solver_inputs(x0, x_lb, x_ub, n_ceq, n_cineq, deriv)
     check_ipopt_options(kwargs)
     n = length(x0)
+    pattern = resolve_jac_sparsity(jac_sparsity, fitness, x0, n_ceq, n_cineq)
 
     x0 = convert(Vector{Float64}, x0)
     x_L = convert(Vector{Float64}, x_lb)
@@ -171,13 +240,14 @@ function solve_ipopt(
     # Cache the residual and its Jacobian separately, each keyed on the `x` it was
     # computed at, so that trial points that only need f or g (line search) do
     # not pay for a Jacobian, and no point is evaluated twice.
-    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv; x_lb=x_L, x_ub=x_U)
+    # `J_cache` is the dense (1 + m) × n Jacobian, or the vector of pattern
+    # entries when `jac_sparsity` is given.
+    evaluator, J_cache = make_evaluator(fitness, pattern, n, n_ceq, n_cineq, deriv; x_lb=x_L, x_ub=x_U)
     x_r = zeros(Float64, n)
     x_J = zeros(Float64, n)
     r_valid = Ref(false)
     J_valid = Ref(false)
     r_cache = zeros(Float64, 1 + m)
-    J_cache = zeros(Float64, 1 + m, n)
 
     function update_value!(x)
         r_valid[] && isequal(x, x_r) && return
@@ -245,7 +315,7 @@ function solve_ipopt(
         if callback_error[] === nothing
             try
                 update_jacobian!(x)
-                grad_f .= view(J_cache, 1, :)
+                objective_gradient!(grad_f, J_cache, pattern)
                 return
             catch err
                 record_error!(err)
@@ -258,26 +328,13 @@ function solve_ipopt(
     function eval_jac_g(x, rows, cols, values)
         if values === nothing
             # Do not access `x` here; Ipopt.jl may pass an undefined object.
-            k = 1
-            for i in 1:m
-                for j in 1:n
-                    rows[k] = i
-                    cols[k] = j
-                    k += 1
-                end
-            end
+            ipopt_jacobian_structure!(rows, cols, pattern, m, n)
             return
         end
         if callback_error[] === nothing
             try
                 update_jacobian!(x)
-                k = 1
-                for i in 1:m
-                    for j in 1:n
-                        values[k] = J_cache[i + 1, j]
-                        k += 1
-                    end
-                end
+                ipopt_jacobian_values!(values, J_cache, pattern, m, n)
                 return
             catch err
                 record_error!(err)
@@ -290,7 +347,7 @@ function solve_ipopt(
     # Returning `false` makes Ipopt stop with `User_Requested_Stop`.
     intermediate(args...) = callback_error[] === nothing
 
-    nele_jac = m * n
+    nele_jac = ipopt_nele_jac(pattern, m, n)
     nele_hess = 0
     prob = Ipopt.CreateIpoptProblem(
         n,

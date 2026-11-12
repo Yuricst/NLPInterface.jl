@@ -7,6 +7,7 @@
 
 using NLPInterface
 using ForwardDiff
+using SparseArrays
 using Test
 
 const VARIANT = Symbol(only(ARGS))
@@ -58,6 +59,25 @@ const ARGS0 = ([0.0, 0.0], [-5.0, -5.0], [5.0, 5.0], 0, 0)
         _, _, info = solve_snopt(fc, [0.0, 0.0], [-5.0, -5.0], [5.0, 5.0], 1, 1; deriv=deriv)
         @test info === :Solve_Succeeded
         @test_throws DimensionMismatch solve_snopt(fc, [0.0, 0.0], [-5.0, -5.0], [5.0, 5.0], 0, 1; deriv=deriv)
+    end
+
+    @testset "sparse Jacobian deriv=$deriv" for deriv in (:forwarddiff, :finitediff)
+        atol = deriv === :forwarddiff ? 1e-8 : 1e-6
+        # The mock takes the objective gradient from the G entries of row 1, so
+        # x[3] (not in the objective row of the pattern) never moves.
+        f3 = x -> ((x[1] - 1)^2 + (x[2] - 2)^2, [x[1] - 1], [x[3] - 3])
+        S = sparse([1, 1, 2, 3], [1, 2, 1, 3], true, 3, 3)
+        args3 = ([0.0, 0.0, 0.5], fill(-5.0, 3), fill(5.0, 3), 1, 1)
+        xopt, fopt, info = solve_snopt(f3, args3...; deriv=deriv, jac_sparsity=S)
+        @test info === :Solve_Succeeded
+        @test xopt ≈ [1.0, 2.0, 0.5] atol = atol
+        @test fopt == f3(xopt)[1]
+        @test_throws ArgumentError solve_snopt(f3, args3...; jac_sparsity=trues(2, 3))
+        # Empty pattern: no G entries at all.
+        xopt, fopt, info = solve_snopt(x -> (1.0, nothing, nothing), ARGS0...; deriv=deriv,
+            jac_sparsity=spzeros(Bool, 1, 2))
+        @test xopt == ARGS0[1]
+        @test fopt == 1.0
     end
 
     @testset "options" begin

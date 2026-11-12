@@ -42,6 +42,11 @@ function pattern_entries(S::SparseArrays.AbstractSparseMatrixCSC)
     end
     return rows, cols
 end
+# Sparse matrices, also wrapped (transpose, adjoint, view), as a
+# SparseMatrixCSC with the same stored entries; any other matrix as is.
+stored_pattern(S::SparseArrays.AbstractSparseMatrixCSC) = S
+stored_pattern(S::AbstractMatrix) = SparseArrays.issparse(S) ? SparseArrays.sparse(S) : S
+
 function pattern_entries(S::AbstractMatrix)
     rows = Int[]
     cols = Int[]
@@ -74,14 +79,7 @@ function JacobianPattern(S::AbstractMatrix, nrows::Integer, ncols::Integer)
             ),
         )
     end
-    if S isa SparseArrays.AbstractSparseMatrixCSC
-        Sc = S
-    elseif S isa SparseArrays.AbstractSparseMatrix
-        Sc = SparseArrays.SparseMatrixCSC(S)
-    else
-        Sc = S
-    end
-    rows, cols = pattern_entries(Sc)
+    rows, cols = pattern_entries(stored_pattern(S))
     return JacobianPattern(rows, cols, Int(nrows), Int(ncols))
 end
 
@@ -225,7 +223,7 @@ function sparse_dual_jacobian!(
         for j in eachindex(xd)
             k = p.colors[j] - c0
             seed = 1 <= k <= N ? seeds[k] : zero_seed
-            xd[j] = ForwardDiff.Dual{T,Float64,N}(x[j], seed)
+            xd[j] = ForwardDiff.Dual{T,Float64,N}(Float64(x[j]), seed)
         end
         rd = ev.residual(xd)
         if c0 == 0 && !r_valid
@@ -290,7 +288,7 @@ function detect_jac_sparsity(fitness, x0::AbstractVector, n_ceq::Integer, n_cine
         ADTypes.jacobian_sparsity(residual, x, sd)
     catch err
         # Our own checks of the fitness output already explain themselves.
-        err isa Union{InterruptException,DimensionMismatch} && rethrow()
+        err isa Union{InterruptException,DimensionMismatch,ArgumentError} && rethrow()
         throw(
             ArgumentError(
                 "sparsity detection with $(nameof(typeof(sd))) failed. `fitness` must be " *
@@ -304,6 +302,19 @@ function detect_jac_sparsity(fitness, x0::AbstractVector, n_ceq::Integer, n_cine
     size(S) == (nr, nc) || throw(
         DimensionMismatch("the detector returned a $(size(S)) pattern; expected ($nr, $nc)"),
     )
+    return bool_pattern(S)
+end
+
+# Boolean sparse pattern of a detector's result: the stored entries of a
+# sparse matrix (stored zeros included), the nonzero entries of a dense one.
+function bool_pattern(S::AbstractMatrix)
+    if SparseArrays.issparse(S)
+        Sc = SparseArrays.sparse(S)
+        return SparseArrays.SparseMatrixCSC{Bool,Int}(
+            size(Sc)..., Vector{Int}(SparseArrays.getcolptr(Sc)),
+            Vector{Int}(SparseArrays.rowvals(Sc)), fill(true, SparseArrays.nnz(Sc)),
+        )
+    end
     return SparseArrays.sparse(S .!= 0)
 end
 
