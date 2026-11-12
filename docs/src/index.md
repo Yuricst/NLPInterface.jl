@@ -17,7 +17,7 @@ Nonlinear programming interface for the gradient-based solvers [Ipopt](https://g
 \end{aligned}
 ```
 
-Derivatives of the stacked residual ``[f; c_{\mathrm{eq}}; c_{\mathrm{ineq}}]`` are taken with ForwardDiff by default, or with finite differences.
+Derivatives of the stacked residual ``[f; c_{\mathrm{eq}}; c_{\mathrm{ineq}}]`` are taken with ForwardDiff by default, or with finite differences. For large problems where each constraint depends on few variables, the Jacobian can be sparse, given by hand or detected automatically (see [Sparse Jacobian](@ref)).
 
 ## Installation
 

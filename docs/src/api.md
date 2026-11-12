@@ -14,7 +14,7 @@ Both solvers minimize `fitness(x) -> (obj, ceq, cineq)` subject to `ceq == 0`, `
 check_solver_inputs
 ```
 
-`deriv` is `:forwarddiff` or `:finitediff`. Every other keyword is a solver option. Ipopt keywords are stringified as written (`tol` → `tol`). SNOPT keywords turn underscores into spaces (`Major_print_level` → `Major print level`). Like SNOPT itself, `solve_snopt` matches option names ignoring case (`print_file` is `Print_file`).
+`deriv` is `:forwarddiff` or `:finitediff`, and `jac_sparsity` selects a sparse Jacobian ([Sparse Jacobian](@ref)). Every other keyword is a solver option. Ipopt keywords are stringified as written (`tol` → `tol`). SNOPT keywords turn underscores into spaces (`Major_print_level` → `Major print level`). Like SNOPT itself, `solve_snopt` matches option names ignoring case (`print_file` is `Print_file`).
 
 ## Ipopt
 
@@ -28,6 +28,15 @@ solve_ipopt
 solve_snopt
 has_snopt
 find_snopt_lib
+```
+
+## Sparsity detection
+
+Both solvers take `jac_sparsity` to use a sparse Jacobian; see
+[Sparse Jacobian](@ref). The pattern can be detected with:
+
+```@docs
+detect_jac_sparsity
 ```
 
 ## Residuals
@@ -44,4 +53,13 @@ Internally, a [`ResidualEvaluator`](@ref) computes the residual and its Jacobian
 ResidualEvaluator
 residual_value!
 residual_value_and_jacobian!
+```
+
+With `jac_sparsity`, the sparsity pattern and its column coloring are held
+in a [`JacobianPattern`](@ref), and a [`SparseResidualEvaluator`](@ref)
+computes only the entries of the pattern.
+
+```@docs
+JacobianPattern
+SparseResidualEvaluator
 ```

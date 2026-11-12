@@ -1,6 +1,6 @@
 # TODO
 
-State as of 2026-11-11 (`main` at ace86bf).
+State as of 2026-11-11 (branch `6-support-for-sparse-jacobian`).
 
 ## Done
 
@@ -13,9 +13,11 @@ State as of 2026-11-11 (`main` at ace86bf).
   - Callable structs are accepted as `fitness`.
 - End-to-end problem tests (`test/test_problems.jl`) solve only the well-conditioned problems with `:finitediff`, so they pass under every platform's numerics. On failure they print a GitHub Actions `::warning`.
 
+- Sparse Jacobian support (issue #6, branch `6-support-for-sparse-jacobian`): `jac_sparsity` keyword on both solvers (matrix pattern, `:auto` via SparseConnectivityTracer, or an ADTypes detector), column coloring with SparseMatrixColorings, `detect_jac_sparsity`, docs page `sparse_jac.md`, `benchmark/sparse_jacobian.jl`.
+
 ## Open
 
-- **Sparse Jacobian support** (issue #6, branch `6-support-for-sparse-jacobian`). The branch has no commits beyond `main` yet, and both solvers still pass a dense Jacobian.
+- **Intermittent GC corruption in the test suite (pre-existing).** `Pkg.test(julia_args=["--heap-size-hint=300M"])` aborts with `GC error (probable corruption)` in some runs. On d72207d (before the sparse work) it did so in 3 of 4 runs, during `test_mock_snopt.jl`; it was also seen once on the sparse branch, during `test_review_fixes.jl`. Both times after `test_snopt.jl` had run the real SNOPT library in-process, so the in-process SNOPT path (ccall/`unsafe_wrap`/workspace) is the first suspect. Not yet reproduced with the mock library alone.
 
 ## Known limitations (cannot be removed in this package)
 
