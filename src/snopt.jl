@@ -522,6 +522,9 @@ function snopt_option_keyword(key::AbstractString)
     return String(key)
 end
 
+# Lower case, single blanks: "Major_Print__Level" -> "major print level".
+snopt_canonical_keyword(keyword::AbstractString) = join(split(lowercase(keyword)), " ")
+
 function snopt_set_option!(iw, leniw, rw, lenrw, optstring::AbstractString)
     errors = Ref{Cint}(0)
     ccall(
@@ -870,11 +873,16 @@ Solve a constrained minimization problem with SNOPT.
 
 `fitness(x)` must return `(obj, ceq, cineq)` with `ceq == 0` and `cineq <= 0`.
 
-Keyword `deriv` selects derivatives (`:forwarddiff` default, or `:finitediff`).
+`fitness` may be any callable object, not only a `Function`.
+
+Keyword `deriv` selects derivatives (`:forwarddiff` default, or `:finitediff`:
+one-sided differences that step backward where a forward step would cross
+`x_ub`, so `fitness` is evaluated inside the bounds).
 `Print_file` and `Summary_file` select SNOPT output files. A nonzero
 `Major_print_level` with no `Summary_file` prints the SNOPT summary (major
 iteration log) to the console. All other keyword arguments are passed through
-as SNOPT options (underscores become spaces).
+as SNOPT options (underscores become spaces). Like SNOPT itself, option names
+are matched ignoring case, so `print_file` is the same as `Print_file`.
 
 The lengths of `ceq` and `cineq` must equal `n_ceq` and `n_cineq` at every
 evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
@@ -904,8 +912,9 @@ Handing the call to a task that existed before the solve deadlocks; a solve
 that waits more than a minute for another one to finish logs a warning saying
 so.
 
-`fitness` must not keep a reference to `x`: the array is reused between calls
-(copy it to keep it).
+`fitness` receives a copy of the solver's iterate, so modifying `x` does not
+affect the solve. It must not keep a reference to `x`: the array is reused
+between calls (copy it to keep it).
 
 Returns `(xopt, fopt, info)`. `info` is a symbol from
 `NLPInterface.SNOPT_RETURN_STATUS`. `fopt` is the objective of a plain
@@ -922,7 +931,7 @@ run normally in elastic mode, where the manual does not promise the constraints
 hold, so check them before using `xopt`.
 """
 function solve_snopt(
-    fitness::Function,
+    fitness,
     x0::AbstractVector,
     x_lb::AbstractVector,
     x_ub::AbstractVector,
@@ -965,7 +974,7 @@ function solve_snopt(
     xmul = zeros(Float64, n)
     Fmul = zeros(Float64, nF)
 
-    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv)
+    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv; x_lb=x_lb, x_ub=x_ub)
     r_buf = zeros(Float64, nF)
     J_buf = zeros(Float64, nF, n)
     # Set once `fitness` has returned a value. Until then `F` holds only the
@@ -1022,13 +1031,15 @@ function solve_snopt(
     major_print_level = nothing
     solver_kwargs = Pair{Any,Any}[]
     for (key, val) in kwargs
-        keyword = snopt_option_keyword(key)
-        if keyword == "Print file"
+        # SNOPT matches keywords ignoring case and repeated blanks; so must we,
+        # or `print_file="p.out"` reaches SNOPT as a (silently ignored) option.
+        keyword = snopt_canonical_keyword(snopt_option_keyword(key))
+        if keyword == "print file"
             printfile = string(val)
-        elseif keyword == "Summary file"
+        elseif keyword == "summary file"
             summfile = string(val)
         else
-            keyword == "Major print level" && (major_print_level = val)
+            keyword == "major print level" && (major_print_level = val)
             push!(solver_kwargs, key => val)
         end
     end

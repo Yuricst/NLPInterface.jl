@@ -114,8 +114,11 @@ Solve a constrained minimization problem with Ipopt.
 
 `fitness(x)` must return `(obj, ceq, cineq)` with `ceq == 0` and `cineq <= 0`.
 
-Keyword `deriv` selects derivatives (`:forwarddiff` default, or `:finitediff`).
-All other keyword arguments are passed through as Ipopt options. An integer
+`fitness` may be any callable object, not only a `Function`.
+
+Keyword `deriv` selects derivatives (`:forwarddiff` default, or `:finitediff`:
+one-sided differences that step backward where a forward step would cross
+`x_ub`). All other keyword arguments are passed through as Ipopt options. An integer
 value for a real-valued option (e.g. `tol=1`) is converted to `Float64`. The
 Hessian is always approximated with L-BFGS (`hessian_approximation =
 "limited-memory"`); any other `hessian_approximation` throws an `ArgumentError`.
@@ -132,14 +135,19 @@ An interrupt (Ctrl-C) during the solve throws `InterruptException`.
 The lengths of `ceq` and `cineq` must equal `n_ceq` and `n_cineq` at every
 evaluation; otherwise a `DimensionMismatch` is thrown. `x0` is not modified.
 
-`fitness` must not keep a reference to `x`: the array is reused between calls
-(copy it to keep it).
+Unlike Ipopt's own default, `bound_relax_factor` is `0.0`, so `fitness` is only
+evaluated inside `[x_lb, x_ub]` (Ipopt would otherwise step up to ~1e-8 outside
+them, where `fitness` may be undefined). Pass `bound_relax_factor` to override.
+
+`fitness` receives a copy of the solver's iterate, so modifying `x` does not
+affect the solve. It must not keep a reference to `x`: the array is reused
+between calls (copy it to keep it).
 
 Returns `(xopt, fopt, info)`. `info` is a symbol from
 `NLPInterface.IPOPT_RETURN_STATUS`.
 """
 function solve_ipopt(
-    fitness::Function,
+    fitness,
     x0::AbstractVector,
     x_lb::AbstractVector,
     x_ub::AbstractVector,
@@ -163,7 +171,7 @@ function solve_ipopt(
     # Cache the residual and its Jacobian separately, each keyed on the `x` it was
     # computed at, so that trial points that only need f or g (line search) do
     # not pay for a Jacobian, and no point is evaluated twice.
-    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv)
+    evaluator = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv; x_lb=x_L, x_ub=x_U)
     x_r = zeros(Float64, n)
     x_J = zeros(Float64, n)
     r_valid = Ref(false)
@@ -303,6 +311,11 @@ function solve_ipopt(
     for (key, val) in kwargs
         add_ipopt_option!(prob, String(key), val)
     end
+    # Ipopt relaxes the bounds by `bound_relax_factor` (default 1e-8) and would
+    # then call `fitness` slightly outside [x_lb, x_ub]. Keep it inside, unless
+    # the caller chose a value.
+    haskey(kwargs, :bound_relax_factor) ||
+        Ipopt.AddIpoptNumOption(prob, "bound_relax_factor", 0.0)
     # Always use an L-BFGS Hessian; we do not supply eval_h.
     Ipopt.AddIpoptStrOption(prob, "hessian_approximation", "limited-memory")
     Ipopt.SetIntermediateCallback(prob, intermediate)

@@ -50,7 +50,7 @@ The interface implements the interface
 """Solve minimization problem with SNOPT
 
 Args:
-- `fitness::Function`: fitness function
+- `fitness`: fitness function (any callable)
 - `x0::Array`: initial guess
 - `x_lb::Array`: lower bound on decision variables
 - `x_ub::Array`: upper bound on decision variables
@@ -58,7 +58,7 @@ Args:
 - `n_cineq::Int`: number of inequality constraints
 """
 function solve_snopt(
-    fitness::Function,
+    fitness,
     x0::Array,
     x_lb::Array,
     x_ub::Array,
@@ -74,7 +74,7 @@ and
 """Solve minimization problem with IPOPT
 
 Args:
-- `fitness::Function`: fitness function
+- `fitness`: fitness function (any callable)
 - `x0::Array`: initial guess
 - `x_lb::Array`: lower bound on decision variables
 - `x_ub::Array`: upper bound on decision variables
@@ -82,7 +82,7 @@ Args:
 - `n_cineq::Int`: number of inequality constraints
 """
 function solve_ipopt(
-    fitness::Function,
+    fitness,
     x0::Array,
     x_lb::Array,
     x_ub::Array,

@@ -14,7 +14,7 @@ Both solvers minimize `fitness(x) -> (obj, ceq, cineq)` subject to `ceq == 0`, `
 check_solver_inputs
 ```
 
-`deriv` is `:forwarddiff` or `:finitediff`. Every other keyword is a solver option. Ipopt keywords are stringified as written (`tol` → `tol`). SNOPT keywords turn underscores into spaces (`Major_print_level` → `Major print level`).
+`deriv` is `:forwarddiff` or `:finitediff`. Every other keyword is a solver option. Ipopt keywords are stringified as written (`tol` → `tol`). SNOPT keywords turn underscores into spaces (`Major_print_level` → `Major print level`). Like SNOPT itself, `solve_snopt` matches option names ignoring case (`print_file` is `Print_file`).
 
 ## Ipopt
 
