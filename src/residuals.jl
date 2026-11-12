@@ -104,12 +104,17 @@ function packed_residual(fitness, x, n_ceq, n_cineq)
     return r
 end
 
+# Dense Jacobian of the packed residual at `x` (used by the tests as a reference).
 function jacobian_residual(fitness, x, n_ceq, n_cineq, deriv::Symbol)
-    residual = ξ -> packed_residual(fitness, ξ, n_ceq, n_cineq)
     if deriv === :forwarddiff
+        residual = ξ -> packed_residual(fitness, ξ, n_ceq, n_cineq)
         return ForwardDiff.jacobian(residual, x)
     elseif deriv === :finitediff
-        return FiniteDiff.finite_difference_jacobian(residual, x)
+        n = length(x)
+        ev = ResidualEvaluator(fitness, n, n_ceq, n_cineq, deriv)
+        r = zeros(Float64, 1 + n_ceq + n_cineq)
+        J = zeros(Float64, 1 + n_ceq + n_cineq, n)
+        return residual_value_and_jacobian!(ev, r, J, x, false)
     else
         throw(ArgumentError("Unknown deriv=$deriv; use :forwarddiff or :finitediff"))
     end
