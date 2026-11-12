@@ -248,6 +248,21 @@ end
         @test fs == 1.0
     end
 
+    # A constant constraint (empty pattern row) keeps its value: a violated
+    # one is not reported as solved (SNOPT would treat an F row without G
+    # entries as linear and replace its value by A * x = 0).
+    for sp in (:auto, sparse([1, 1], [1, 2], true, 2, 2))
+        fviol_eq = x -> ((x[1] - 1)^2 + x[2]^2, [x[2] * 0 + 2.0], nothing)
+        _, _, info = solve_with(solver, fviol_eq, [0.0, 0.0], fill(-3.0, 2), fill(3.0, 2), 1, 0; jac_sparsity=sp)
+        @test info === :Infeasible_Problem_Detected
+        fviol_in = x -> ((x[1] - 1)^2 + x[2]^2, nothing, [one(eltype(x))])
+        _, _, info = solve_with(solver, fviol_in, [0.0, 0.0], fill(-3.0, 2), fill(3.0, 2), 0, 1; jac_sparsity=sp)
+        @test info === :Infeasible_Problem_Detected
+    end
+
+    # Errors thrown by `fitness` during `:auto` detection pass through as is.
+    @test_throws ErrorException("boom") solve_with(solver, x -> error("boom"), args...; jac_sparsity=:auto)
+
     # Bad `jac_sparsity` values are rejected before `fitness` is called.
     g, plain, dual = counted(P.fitness)
     for bad in (trues(2, 2), :bogus, "auto", 1.0, (P.pattern,))

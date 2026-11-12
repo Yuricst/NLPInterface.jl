@@ -866,15 +866,26 @@ function dense_jacobian_pattern(nF::Int, n::Int)
     return iGfun, jGvar, neG
 end
 
-# SNOPT's G arrays for the packed Jacobian: dense, or the pattern entries.
+# SNOPT's G arrays for the packed Jacobian: dense, or the pattern entries. SNOPT
+# treats a row of F without G entries as linear (`A * x`, here 0) and ignores the
+# value `usrfun` returns for it, so every empty row of the pattern (a constant
+# function) gets a placeholder entry in column 1, always zero.
 snopt_jacobian_pattern(::Nothing, nF::Int, n::Int) = dense_jacobian_pattern(nF, n)
 function snopt_jacobian_pattern(p::JacobianPattern, nF::Int, n::Int)
-    neG = SparseArrays.nnz(p)
-    iGfun = ones(Int32, max(neG, 1))
-    jGvar = ones(Int32, max(neG, 1))
-    iGfun[1:neG] .= p.rows
-    jGvar[1:neG] .= p.cols
-    return iGfun, jGvar, neG
+    has_entry = falses(nF)
+    has_entry[p.rows] .= true
+    empty_rows = findall(!, has_entry)
+    iGfun = Int32[p.rows; empty_rows]
+    jGvar = Int32[p.cols; ones(Int, length(empty_rows))]
+    return iGfun, jGvar, length(iGfun)
+end
+
+# Copy the Jacobian (dense matrix, or pattern entries) into SNOPT's `G`; the
+# placeholder entries after the pattern entries are zero.
+function snopt_store_G!(G, J)
+    copyto!(G, 1, J, 1, length(J))
+    G[(length(J) + 1):end] .= 0.0
+    return G
 end
 
 """
@@ -1034,7 +1045,7 @@ function solve_snopt(
             # One pass gives both the value and the Jacobian (see ResidualEvaluator).
             residual_value_and_jacobian!(evaluator, r_buf, J_buf, xv, false)
             Gg = unsafe_wrap(Array, G_, Int(unsafe_load(neG_)))
-            Gg .= vec(J_buf)
+            snopt_store_G!(Gg, J_buf)
         elseif needF
             residual_value!(evaluator, r_buf, xv)
         else
@@ -1239,9 +1250,8 @@ function solve_snopt(
                 # INFO 91, or INFO 61 when `fitness` is undefined at `x0`). `F[1]`
                 # is not used: SNOPT may leave it at another point (its derivative
                 # check perturbs `x`), and with ForwardDiff it comes from a Dual
-                # evaluation. With an empty Jacobian pattern (`neG == 0`) SNOPT
-                # never calls `usrfun`, so `fopt` comes from a plain call.
-                fopt = if !f_evaluated[] && neG > 0
+                # evaluation.
+                fopt = if !f_evaluated[]
                     NaN
                 elseif isequal(x_plain, x)
                     f_plain[]

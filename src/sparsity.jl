@@ -287,8 +287,11 @@ function detect_jac_sparsity(fitness, x0::AbstractVector, n_ceq::Integer, n_cine
     S = try
         ADTypes.jacobian_sparsity(residual, x, sd)
     catch err
-        # Our own checks of the fitness output already explain themselves.
-        err isa Union{InterruptException,DimensionMismatch,ArgumentError} && rethrow()
+        # Code that is not generic in the element type of `x` fails with a
+        # TypeError (a branch on a tracer, a type assertion) or a MethodError (a
+        # conversion to Float64); explain those. Anything else (our checks of the
+        # fitness output, an error thrown by `fitness` itself) passes through.
+        err isa Union{TypeError,MethodError} || rethrow()
         throw(
             ArgumentError(
                 "sparsity detection with $(nameof(typeof(sd))) failed. `fitness` must be " *
