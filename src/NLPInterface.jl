@@ -1,15 +1,18 @@
 module NLPInterface
 
 using DiffResults
-using FiniteDiff
 using ForwardDiff
 using Ipopt
 using Libdl
+import ADTypes
+import SparseArrays
+import SparseMatrixColorings
 
-export solve_ipopt, solve_snopt, has_snopt
+export solve_ipopt, solve_snopt, has_snopt, detect_jac_sparsity
 
 include("validation.jl")
 include("residuals.jl")
+include("sparsity.jl")
 include("ipopt.jl")
 include("snopt.jl")
 

@@ -56,7 +56,9 @@ jobs:
           version: 'lts'
       - uses: julia-actions/julia-downgrade-compat@v1
         with:
-          skip: Libdl,Test
+          # Standard libraries are versioned with Julia itself (1.10.x on lts),
+          # so their compat entries cannot be pinned to the lower bound "1.0".
+          skip: Libdl,Test,SparseArrays,Random
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         # with:

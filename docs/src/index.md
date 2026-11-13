@@ -17,7 +17,7 @@ Nonlinear programming interface for the gradient-based solvers [Ipopt](https://g
 \end{aligned}
 ```
 
-Derivatives of the stacked residual ``[f; c_{\mathrm{eq}}; c_{\mathrm{ineq}}]`` are taken with ForwardDiff by default, or with finite differences.
+Derivatives of the stacked residual ``[f; c_{\mathrm{eq}}; c_{\mathrm{ineq}}]`` are taken with ForwardDiff by default, or with finite differences. For large problems where each constraint depends on few variables, the Jacobian can be sparse, given by hand or detected automatically (see [Sparse Jacobian](@ref)).
 
 ## Installation
 
@@ -26,6 +26,21 @@ pkg> add https://github.com/Yuricst/NLPInterface.jl.git
 ```
 
 Ipopt is installed automatically through [Ipopt.jl](https://github.com/jump-dev/Ipopt.jl). SNOPT is proprietary: a license and a prebuilt shared library are required before [`solve_snopt`](@ref) can run. See [SNOPT setup](@ref) below.
+
+### Optional: automatic sparsity detection
+
+`jac_sparsity = :auto` (see [Sparse Jacobian](@ref)) detects the Jacobian's sparsity pattern with [SparseConnectivityTracer.jl](https://github.com/adrhill/SparseConnectivityTracer.jl). It is an optional dependency: it is not installed with NLPInterface. Add it to your own environment, and load it next to NLPInterface:
+
+```julia
+pkg> add SparseConnectivityTracer
+```
+
+```julia
+using NLPInterface
+using SparseConnectivityTracer   # enables jac_sparsity = :auto
+```
+
+The support for `:auto` then loads automatically (a package extension), in either order of the `using` lines. NLPInterface requires SparseConnectivityTracer 1.x. A hand-made sparsity pattern (`jac_sparsity = S`) needs no extra package.
 
 ## Illustrative example
 

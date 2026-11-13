@@ -12,10 +12,16 @@ and, for 2-D problems only, saves a contour plot of the iterates, one axis per
 solver side by side.
 
 Run from anywhere (uses the demo environment):
-    julia bechmark/benchmark_problems.jl
-Outputs: bechmark/results.csv, bechmark/times.csv (every timed solve),
-bechmark/plots/<problem>_path.png (2-D only), bechmark/plots/cpu_time_boxplot.png
-and bechmark/plots/evals_barplot.png
+    julia benchmark/benchmark_problems.jl
+Outputs: benchmark/results.csv, benchmark/times.csv (every timed solve),
+benchmark/plots/<problem>_path.png (2-D only), benchmark/plots/cpu_time_boxplot.png
+and benchmark/plots/evals_barplot.png
+
+With the argument `auto`, every solve passes `jac_sparsity=:auto` (sparsity
+detection with SparseConnectivityTracer is part of every timed solve), and the
+outputs get the suffix `_auto` (results_auto.csv, times_auto.csv,
+plots/cpu_time_boxplot_auto.png, plots/evals_barplot_auto.png; no path plots):
+    julia benchmark/benchmark_problems.jl auto
 =#
 
 import Pkg
@@ -25,7 +31,12 @@ using CairoMakie
 using ForwardDiff
 using NLPInterface
 using Printf
+using SparseConnectivityTracer
 using Statistics
+
+# `jac_sparsity` passed to every solve, and the suffix of the output files.
+const JAC_SPARSITY = "auto" in ARGS ? :auto : nothing
+const SUFFIX = JAC_SPARSITY === :auto ? "_auto" : ""
 
 include(joinpath(@__DIR__, "..", "test", "problems.jl"))
 
@@ -53,7 +64,8 @@ function run_solver(solver, fitness, p; kwargs...)
     if solver == "snopt"
         return solve_snopt(
             fitness, p.x0, p.x_lb, p.x_ub, p.n_ceq, p.n_cineq;
-            Major_feasibility_tolerance=TOL, Major_optimality_tolerance=TOL, kwargs...,
+            Major_feasibility_tolerance=TOL, Major_optimality_tolerance=TOL,
+            jac_sparsity=JAC_SPARSITY, kwargs...,
         )
     elseif solver == "ipopt"
         return solve_ipopt(
@@ -61,7 +73,7 @@ function run_solver(solver, fitness, p; kwargs...)
             print_level=0, sb="yes",
             tol=TOL, constr_viol_tol=TOL, dual_inf_tol=TOL, compl_inf_tol=TOL,
             limited_memory_max_history=ipopt_lbfgs_history(length(p.x0)),
-            kwargs...,
+            jac_sparsity=JAC_SPARSITY, kwargs...,
         )
     end
     error("unknown solver $solver")
@@ -74,6 +86,8 @@ end
 function record_run(solver, p)
     path = Vector{Vector{Float64}}()
     function fitness_logged(x)
+        # Sparsity detection (`auto`) calls fitness with tracer numbers; not a point.
+        eltype(x) <: Union{Float64,ForwardDiff.Dual} || return p.fitness(x)
         # With deriv=:forwarddiff most calls carry Dual numbers; log their primal value.
         # Skip repeats: one Jacobian may call fitness several times at the same point.
         xv = ForwardDiff.value.(x)
@@ -292,7 +306,8 @@ for name in sort(collect(keys(problems)); by=k -> (length(problems[k].x0), k))
             xerr=maximum(abs, r.xopt .- p.xopt), viol=max_violation(p, r.xopt),
         ))
     end
-    n == 2 && plot_paths(name, p, results)
+    # The `auto` run takes the same paths; its path plots would only repeat them.
+    n == 2 && JAC_SPARSITY === nothing && plot_paths(name, p, results)
 end
 
 println()
@@ -312,7 +327,7 @@ for r in rows
     )
 end
 
-csvfile = joinpath(@__DIR__, "results.csv")
+csvfile = joinpath(@__DIR__, "results$(SUFFIX).csv")
 open(csvfile, "w") do io
     println(
         io,
@@ -338,7 +353,7 @@ end
 println("saved ", csvfile)
 
 # Every timed solve, one row each, for the CPU-time box plot.
-timesfile = joinpath(@__DIR__, "times.csv")
+timesfile = joinpath(@__DIR__, "times$(SUFFIX).csv")
 open(timesfile, "w") do io
     println(io, "problem,label,n,solver,run,cpu_s")
     for r in rows, (k, t) in enumerate(r.times)
@@ -348,7 +363,7 @@ end
 println("saved ", timesfile)
 
 include(joinpath(@__DIR__, "plot_cpu_times.jl"))
-plot_cpu_times(timesfile)
+plot_cpu_times(timesfile; outfile=joinpath(@__DIR__, "plots", "cpu_time_boxplot$(SUFFIX).png"))
 
 include(joinpath(@__DIR__, "plot_evals.jl"))
-plot_evals(csvfile)
+plot_evals(csvfile; outfile=joinpath(@__DIR__, "plots", "evals_barplot$(SUFFIX).png"))

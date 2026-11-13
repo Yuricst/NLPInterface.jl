@@ -17,9 +17,13 @@
 Nonlinear programming (NLP) interface for gradient-based solvers [SNOPT](https://ccom.ucsd.edu/~optimizers/docs/snopt/introduction.html) and [Ipopt](https://github.com/coin-or/ipopt) in Julia.
 
 Distinction from other similar libraries:
-- Unlike `JuMP`, `NLPInterface` is *not* a modeling language; instead, it expects a user-defined differentiable function that evaluates the objective and constraint(s).
+
+- Unlike `JuMP`/`MadNLP`, `NLPInterface` is *not* a modeling language; instead, it expects a user-defined differentiable function that evaluates the objective and constraint(s).
 - It is similar to [`SNOW.jl`](https://github.com/byuflowlab/SNOW.jl)/[`Snopt.jl`](https://github.com/byuflowlab/Snopt.jl); a distinction is that `Snopt.jl` `ccall`s SNOPT's Fortran entry points (`snopta_`, `sninit_`, ...) and builds SNOPT from Fortran sources, whereas `NLPInterface` `ccall`s the C wrappers (`f_snopta`, `f_snset`, ...) in a prebuilt `libsnopt7_cpp` / `libsnopt7_c` library (which still contains the Fortran solver). This choice lets users load the official prebuilt SNOPT libraries instead of compiling Fortran themselves, and Julia's C ABI is more portable than Fortran name mangling and string arguments.
+- The interface is inspired by `pygmo` and its use of a user-defined ``fitness'' function, which returns, in a single vector, the objective along with constraints. This architecture is advantageous as evaluation of constraints/objective in many NLP share common terms. This interface design is in contrast to libraries like `Optim` and `NLopt`, where the interface requires the objective and constraints defined as separate functions.
 - It provides a common, easy to use interface wrapping [`Ipopt.jl`](https://juliapackages.com/p/ipopt)/the SNOPT C library.
+
+For a full list of nonlinear programming packages in Julia, see [the Julia packages site](https://juliapackages.com/c/nonlinear-programming).
 
 
 ## Overview
@@ -105,6 +109,16 @@ or
 ```
 pkg> add https://github.com/Yuricst/NLPInterface.jl.git
 ```
+
+### Optional: automatic sparsity detection
+
+`jac_sparsity = :auto` (see [Sparse Jacobian](#sparse-jacobian)) detects the Jacobian's sparsity pattern with [SparseConnectivityTracer.jl](https://github.com/adrhill/SparseConnectivityTracer.jl). It is an optional dependency that is not installed with `NLPInterface`, so add it to your environment:
+
+```
+pkg> add SparseConnectivityTracer
+```
+
+and load it next to `NLPInterface` (`using SparseConnectivityTracer`); the support for `:auto` then loads automatically as a package extension. A hand-made sparsity pattern needs no extra package.
 
 ### SNOPT setup
 
@@ -198,3 +212,21 @@ xopt, fopt, info = NLPInterface.solve_snopt(
     Major_optimality_tolerance=1e-6,
 )
 ```
+
+## Sparse Jacobian
+
+By default both solvers use a dense Jacobian of `[obj; ceq; cineq]`. For large problems where each constraint depends on few variables (collocation, multiple shooting, ...), pass its sparsity pattern with `jac_sparsity`. This cuts the `fitness` calls per Jacobian (columns that share no row are differentiated together), the memory, and the solvers' linear algebra:
+
+```julia
+using NLPInterface
+using SparseConnectivityTracer   # needed for jac_sparsity = :auto
+
+# detect the pattern automatically ...
+xopt, fopt, info = solve_ipopt(fitness, x0, x_lb, x_ub, n_ceq, n_cineq; jac_sparsity=:auto)
+
+# ... or pass it by hand: a (1 + n_ceq + n_cineq) × length(x0) matrix; row 1 is the objective
+S = detect_jac_sparsity(fitness, x0, n_ceq, n_cineq)   # or build it with SparseArrays.sparse
+xopt, fopt, info = solve_snopt(fitness, x0, x_lb, x_ub, n_ceq, n_cineq; jac_sparsity=S)
+```
+
+On a 1120-variable collocation problem this made Ipopt 170–230× and SNOPT about 12× faster per solve, with 28–130× less memory. On small, mostly dense problems it does not pay off, so the default stays dense. See the [Sparse Jacobian page](https://yuricst.github.io/NLPInterface.jl/sparse_jac/) of the documentation for details and the full benchmark.

@@ -24,6 +24,7 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "Tutorial" => "tutorial.md",
+        "Sparse Jacobian" => "sparse_jac.md",
         "API" => "api.md",
     ],
 )

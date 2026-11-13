@@ -6,6 +6,8 @@ Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 NLPInterface = "e604ab98-cb68-4d52-a41a-b2fbd5dba595"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+SparseConnectivityTracer = "9f842d2f-2579-4b1d-911e-f412cf18a3f5"
 
 [sources]
 NLPInterface = {path = ".."}

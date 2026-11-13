@@ -5,13 +5,37 @@ with `solve_snopt` and `solve_ipopt` and compares objective value, accuracy, CPU
 time, `fitness` evaluation count, iteration counts, and the path of iterates.
 
 ```sh
-julia bechmark/benchmark_problems.jl
+julia benchmark/benchmark_problems.jl
 ```
 
 The script activates the `demo/` environment, so it can be run from any directory.
 It writes `results.csv` (all recorded quantities), `times.csv` (every timed
 solve), `plots/cpu_time_boxplot.png`, `plots/evals_barplot.png`, and, for 2-D
 problems only, `plots/<problem>_path.png`.
+
+With the argument `auto`, every solve passes `jac_sparsity = :auto`, so the
+sparsity pattern is detected with SparseConnectivityTracer (inside every timed
+solve) and the solvers get a sparse Jacobian. The outputs then carry the
+suffix `_auto` (`results_auto.csv`, `times_auto.csv`, `plots/cpu_time_boxplot_auto.png`,
+`plots/evals_barplot_auto.png`; the path plots are not redrawn):
+
+```sh
+julia benchmark/benchmark_problems.jl auto
+```
+
+**Archive.** `results_log/` keeps `results.csv` from earlier runs, named
+`results_<commit>.csv` (and `results_<commit>_auto.csv` for the `auto` run), so
+CPU times can be compared across versions.
+
+**Dense vs. sparse Jacobian.** `sparse_jacobian.jl` benchmarks `jac_sparsity`
+on a scalable collocation problem; see the Sparse Jacobian page of the
+documentation (`docs/src/sparse_jac.md`) for the protocol and results.
+
+```sh
+julia benchmark/sparse_jacobian.jl        # CPU time, fitness calls, allocations -> sparse_results.csv
+julia benchmark/sparse_jacobian_rss.jl    # peak RSS, Linux only -> sparse_rss.csv
+julia benchmark/plot_sparse.jl            # redraw docs/src/assets/sparse_*.png from both CSVs
+```
 
 ## Protocol
 
