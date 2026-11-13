@@ -25,6 +25,24 @@ With it:
 
 The default stays `jac_sparsity = nothing`, which is dense and unchanged.
 
+## Installation
+
+A hand-made pattern works with NLPInterface alone. Automatic detection
+(`jac_sparsity = :auto`, and [`detect_jac_sparsity`](@ref) without a
+`detector`) needs
+[SparseConnectivityTracer.jl](https://github.com/adrhill/SparseConnectivityTracer.jl).
+It is an optional dependency, which is not installed with NLPInterface, so
+add it to your environment once:
+
+```julia
+pkg> add SparseConnectivityTracer
+```
+
+Then load it next to NLPInterface with `using SparseConnectivityTracer`, in
+either order. This loads NLPInterface's extension for it. NLPInterface
+requires SparseConnectivityTracer 1.x. Without the package, `:auto` throws an
+`ArgumentError` that says to load it.
+
 ## Quick start
 
 The fastest way is automatic detection. Load
