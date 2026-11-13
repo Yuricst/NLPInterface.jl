@@ -7,6 +7,13 @@ using SparseConnectivityTracer: TracerSparsityDetector, TracerLocalSparsityDetec
 
 const JP = NLPInterface.JacobianPattern
 
+# A detector that returns a fixed matrix, stored zeros included (like ADTypes'
+# KnownJacobianSparsityDetector, which ADTypes 1.2, the lowest allowed, lacks).
+struct StoredPatternDetector{M} <: NLPInterface.ADTypes.AbstractSparsityDetector
+    S::M
+end
+NLPInterface.ADTypes.jacobian_sparsity(f, x, d::StoredPatternDetector) = d.S
+
 # Dense matrix holding the sparse evaluator's entries.
 densify(p, Jnz) = Matrix(sparse(p.rows, p.cols, Jnz, p.nrows, p.ncols))
 
@@ -178,7 +185,7 @@ end
         x -> ("a", nothing, nothing), [1.0, 2.0], 0, 0)
     # A detector's stored zeros stay in the pattern.
     Z = sparse([1, 2, 2], [1, 1, 2], [1.0, 0.0, 1.0], 2, 2)
-    known = NLPInterface.ADTypes.KnownJacobianSparsityDetector(Z)
+    known = StoredPatternDetector(Z)
     @test detect_jac_sparsity(x -> (x[1], [x[2]], nothing), [1.0, 2.0], 1, 0; detector=known) ==
           sparse([1, 2, 2], [1, 1, 2], true, 2, 2)
 end
