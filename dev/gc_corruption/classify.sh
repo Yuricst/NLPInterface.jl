@@ -12,7 +12,7 @@ for log in "$out"/run_*.log; do
         echo "GCERR $(basename "$log")  $gcs  tag: $vt  during: $where"
     elif grep -qaE "signal [0-9]+" "$log"; then
         c=$((c + 1)); echo "CRASH $(basename "$log")  $(grep -a -m1 -oE "signal [0-9]+ \([0-9]+\): [A-Za-z ]+" "$log")  during: $where"
-    elif grep -qE "^NLPInterface +\|" "$log" && ! grep -qE "Test Failed|Error During Test|Some tests did not pass" "$log"; then
+    elif grep -qaE "^NLPInterface +\||: completed" "$log" && ! grep -qaE "Test Failed|Error During Test|Some tests did not pass" "$log"; then
         p=$((p + 1)); echo "PASS  $(basename "$log")"
     else
         f=$((f + 1)); echo "FAIL  $(basename "$log")  $(grep -m1 -E 'Test Failed|Error During|ERROR:' "$log" | cut -c1-80)"

@@ -156,3 +156,68 @@ NLPInterface's `ScopedValue` scope (`_with_snopt_in_solve`), which later
 enters such a scope again and runs a solve, is enough. It reproduces on main
 too (6/6), so the bug is still present there; the full suite on main only
 misses the detection window.
+
+## Step 4: bisection, down to a Julia-only reproducer
+
+`runners/snopt_testsets.jl` runs `test_snopt.jl` with only the `@testset`s
+named in `NLPI_KEEP` (optionally `NLPI_REPEAT` times, after `NLPI_PRE_FILES`),
+then forces full GCs with allocation in between. On d72207d, K = 4 or 8:
+
+- all of `test_snopt.jl` alone: 8/8 aborts (all at GC #67);
+- each testset alone: 0/4 for every one of the 8 testsets;
+- leave one out: only removing "nested solve_snopt" stops it (0/4);
+  every other removal still aborts (2/4 to 4/4);
+- "nested solve_snopt" together with any other testset: aborts in 1/4 to 4/4;
+  "nested solve_snopt" run three times: 2/4. The other testsets only add the
+  allocation that gets the damage detected.
+
+That testset's worker task (spawned in fitness, solving after the outer
+solve) is the trigger (step 3). Removing NLPInterface step by step
+(`repro/scoped.jl`, `repro/mwe.jl`, K = 6):
+
+| scenario | default threads | `--threads=1,0` |
+|---|---|---|
+| task spawned in a `with` scope, re-enters `with`, raw Ipopt.jl solve | 6/6 | 0/6 |
+| same with `qsort` and a full GC inside the Julia comparator | 6/6 | 6/6 |
+| task spawned outside any scope (`plain_qsort_gc`) | 0/6 | |
+| task spawned in the scope, does not re-enter `with` | 0/6 | |
+| task re-enters `with` but did not inherit a scope | 0/6 | |
+| task spawned in the scope, re-enters `with`, plain `GC.gc(true)` | 6/6 | |
+| `mwe.jl`: `@spawn`/`@async`, Ref or Int values | 6/6 each | 6/6 each |
+| `mwe.jl` `direct_ref`: nested `with` + GC in the same task | 0/6 | 0/6 |
+
+`repro/mwe_min.jl`, no packages, aborts on the first GC on Julia 1.12.1 and
+1.12.3, with and without a heap hint (4/4 each):
+
+```julia
+using Base.ScopedValues
+const sv = ScopedValue(0)
+for i in 1:200
+    t = with(() -> @async(with(() -> GC.gc(true), sv => 2)), sv => 1)
+    wait(t)
+    GC.gc(true)
+end
+```
+
+Controls (3 runs each): without the outer `with`, without the inner `with`, or
+without both, it passes 3/3. The inner `with` may use a different
+`ScopedValue`, or be Base's own `with_logger`: still 3/3 aborts.
+
+### Conclusion of step 4
+
+This is a bug in Julia 1.12's ScopedValues: a task created inside a `with`
+scope (which inherits that scope), entering any `with` itself, with a full GC
+inside, corrupts the heap. `with` is lowered to
+`Expr(:tryfinally, body, nothing, scope)`, so the scope switch is done by
+codegen and the runtime; it cannot be fixed in a package. No matching report
+was found in the Julia issue tracker; JuliaLang/julia#63831 (a 1.12 GC crash
+from a partially initialized Union box, fix #60924 not backported to 1.12) is
+a possible root cause, since `Scope` objects hold `Union{Nothing, ...}`
+fields, but that is unconfirmed.
+
+How NLPInterface hits it: `solve_snopt` wraps the whole solve, including
+`fitness`, in `with(_SNOPT_IN_SOLVE => active)` (Julia >= 1.11). Any task a
+user spawns from `fitness` inherits that scope. If that task later enters any
+`with` (another `solve_snopt`, `with_logger`, a library using ScopedValues)
+and a GC runs inside it, the heap is corrupted. The test suite does exactly
+this in "nested solve_snopt" (the worker task).
