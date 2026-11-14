@@ -80,6 +80,35 @@ const ARGS0 = ([0.0, 0.0], [-5.0, -5.0], [5.0, 5.0], 0, 0)
         @test fopt == 1.0
     end
 
+    @testset "NLPResult" begin
+        # x[1] stops at its upper bound 0.5: ∇f = [-1, 0], so z_ub = [1, 0]
+        # (the mock reports the gradient as SNOPT's reduced costs in xmul).
+        ncalls = Ref(0)
+        r = solve_snopt(x -> (ncalls[] += 1; quad(x)), [0.0, 0.0], [-5.0, -5.0], [0.5, 5.0], 0, 0)
+        @test r isa NLPResult
+        @test r.solver === :snopt
+        @test r.status === :Solve_Succeeded && r.raw_status == 1
+        @test r.xopt ≈ [0.5, 2.0] atol = 1e-8
+        @test r.z_ub ≈ [1.0, 0.0] atol = 1e-6
+        @test r.z_lb ≈ [0.0, 0.0] atol = 1e-6
+        @test isempty(r.ceq) && isempty(r.cineq) && isempty(r.lambda_eq) && isempty(r.lambda_ineq)
+        @test ismissing(r.iterations)
+        @test r.n_fitness == ncalls[]
+        @test r.fopt == quad(r.xopt)[1]
+        xopt, fopt, info = r
+        @test (xopt, fopt, info) == (r.xopt, r.fopt, r.status)
+        # Constraint rows (ignored by the mock): values at xopt, one multiplier each.
+        fc = x -> (quad(x)[1], [x[1] - 1], [x[2] - 3, x[1] + x[2] - 10])
+        r = solve_snopt(fc, [0.0, 0.0], [-5.0, -5.0], [5.0, 5.0], 1, 2)
+        _, ceq, cineq = fc(r.xopt)
+        @test r.ceq == ceq && r.cineq == cineq
+        @test length(r.lambda_eq) == 1 && length(r.lambda_ineq) == 2
+        # Stopped early: complete fields, status from the INFO code.
+        r = solve_snopt(quad, ARGS0...; Major_iterations_limit=1)
+        @test r.status === :Maximum_Iterations_Exceeded && r.raw_status == 32
+        @test length(r.z_lb) == 2
+    end
+
     @testset "tasks spawned from fitness" begin
         # Regression (dev/gc_corruption/NOTES.md): solve_snopt used to wrap
         # fitness in a ScopedValue scope. A task spawned from fitness inherited
