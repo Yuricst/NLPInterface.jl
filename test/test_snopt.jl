@@ -305,31 +305,48 @@ if has_snopt()
         @test err isa ErrorException
         @test occursin("nested", sprint(showerror, err))
 
-        if isdefined(Base, :ScopedValues)
-            # From a task spawned in fitness: used to deadlock on the lock.
-            outer_spawn = function (x)
-                fetch(Threads.@spawn solve_snopt(inner, inner_args...))
-                return inner(x)
-            end
-            @test_throws TaskFailedException solve_snopt(outer_spawn, inner_args...)
-
-            # A task spawned in fitness that runs after the solve has ended
-            # is not nested and may solve.
-            go = Channel{Nothing}(1)
-            worker = Ref{Task}()
-            outer_worker = function (x)
-                if !isassigned(worker)
-                    worker[] = Threads.@spawn (take!(go); solve_snopt(inner, inner_args...))
-                end
-                return inner(x)
-            end
-            _, _, info = solve_snopt(outer_worker, inner_args...)
-            @test info === :Solve_Succeeded
-            put!(go, nothing)
-            xw, _, infow = fetch(worker[])
-            @test infow === :Solve_Succeeded
-            @test xw ≈ [2.0, 3.0] atol = 1e-6
+        # From a task that fitness waits for: used to deadlock on the lock. The
+        # waiting solve sees that the lock holder waits for it, and throws.
+        outer_spawn = function (x)
+            fetch(Threads.@spawn solve_snopt(inner, inner_args...))
+            return inner(x)
         end
+        err = try
+            solve_snopt(outer_spawn, inner_args...)
+            nothing
+        catch e
+            e
+        end
+        @test err isa TaskFailedException
+        @test occursin("nested", sprint(showerror, err))
+        # ... also through a chain of waits, and from @sync.
+        outer_chain = function (x)
+            fetch(Threads.@spawn fetch(Threads.@spawn solve_snopt(inner, inner_args...)))
+            return inner(x)
+        end
+        @test_throws TaskFailedException solve_snopt(outer_chain, inner_args...)
+        outer_sync = function (x)
+            @sync Threads.@spawn solve_snopt(inner, inner_args...)
+            return inner(x)
+        end
+        @test_throws CompositeException solve_snopt(outer_sync, inner_args...)
+
+        # A task spawned in fitness that runs after the solve has ended
+        # is not nested and may solve.
+        go = Channel{Nothing}(1)
+        worker = Ref{Task}()
+        outer_worker = function (x)
+            if !isassigned(worker)
+                worker[] = Threads.@spawn (take!(go); solve_snopt(inner, inner_args...))
+            end
+            return inner(x)
+        end
+        _, _, info = solve_snopt(outer_worker, inner_args...)
+        @test info === :Solve_Succeeded
+        put!(go, nothing)
+        xw, _, infow = fetch(worker[])
+        @test infow === :Solve_Succeeded
+        @test xw ≈ [2.0, 3.0] atol = 1e-6
 
         # Neither leaves global state behind.
         xopt, fopt, info = solve_snopt(inner, inner_args...)

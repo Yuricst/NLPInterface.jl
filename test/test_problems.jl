@@ -10,6 +10,14 @@
 # of them are solved with :forwarddiff.
 const FINITEDIFF_PROBLEMS = Set(["rosenbrock", "mishra_bird", "townsend", "crawling", "hs078"])
 
+# L-BFGS memory for Ipopt, as in benchmark/benchmark_problems.jl. Ipopt's default
+# of 6 pairs is too little for rosenbrock_10d: its optimum lies exactly on the
+# constraint boundary (sum(x.^2) = 10) with a zero multiplier, and the Ipopt
+# 3.14.4 build of the minimum dependency versions then stops with
+# Error_In_Step_Computation (x within 5e-5 of the optimum). With 20 pairs both
+# old and current Ipopt end with Solve_Succeeded.
+ipopt_lbfgs_history(n) = min(max(20, n), 75)
+
 const ACCEPTED_STATUSES = (:Solve_Succeeded, :Solved_To_Acceptable_Level)
 
 # The job logs of GitHub Actions need authentication; annotations do not. When a
@@ -40,6 +48,7 @@ end
         else
             NamedTuple()
         end
+        ipopt_tols = (; ipopt_tols..., limited_memory_max_history=ipopt_lbfgs_history(length(p.x0)))
         x0_before = copy(p.x0)
         xopt, fopt, info = solve_ipopt(
             p.fitness,
