@@ -210,8 +210,11 @@ them, where `fitness` may be undefined). Pass `bound_relax_factor` to override.
 affect the solve. It must not keep a reference to `x`: the array is reused
 between calls (copy it to keep it).
 
-Returns `(xopt, fopt, info)`. `info` is a symbol from
-`NLPInterface.IPOPT_RETURN_STATUS`.
+Returns an [`NLPResult`](@ref): the solution `xopt`, the objective `fopt`, the
+status (a symbol from `NLPInterface.IPOPT_RETURN_STATUS`) and Ipopt's return
+code, the constraint values and Lagrange multipliers at `xopt`, Ipopt's
+iteration count, and the number of `fitness` calls. It destructures like the
+tuple of earlier versions: `xopt, fopt, info = solve_ipopt(...)`.
 """
 function solve_ipopt(
     fitness,
@@ -227,6 +230,7 @@ function solve_ipopt(
     check_solver_inputs(x0, x_lb, x_ub, n_ceq, n_cineq, deriv)
     check_ipopt_options(kwargs)
     n = length(x0)
+    fitness = CountedFitness(fitness)   # for `NLPResult.n_fitness`
     pattern = resolve_jac_sparsity(jac_sparsity, fitness, x0, n_ceq, n_cineq)
 
     x0 = convert(Vector{Float64}, x0)
@@ -345,7 +349,12 @@ function solve_ipopt(
     end
 
     # Returning `false` makes Ipopt stop with `User_Requested_Stop`.
-    intermediate(args...) = callback_error[] === nothing
+    # The second argument is Ipopt's iteration count.
+    iterations = Ref(0)
+    function intermediate(alg_mod, iter_count, args...)
+        iterations[] = Int(iter_count)
+        return callback_error[] === nothing
+    end
 
     nele_jac = ipopt_nele_jac(pattern, m, n)
     nele_hess = 0
@@ -392,5 +401,12 @@ function solve_ipopt(
         throw(InterruptException())
     end
     info = get(IPOPT_RETURN_STATUS, status, :Unknown)
-    return copy(prob.x), prob.obj_val, info
+    # Ipopt's convention (Lagrangian f + gᵀλ, gradient ∇f + Jᵀλ - z_L + z_U = 0)
+    # is the one of `NLPResult`, with g = [ceq; cineq].
+    ceq, cineq = constraint_blocks([prob.obj_val; prob.g], n_ceq, n_cineq)
+    lambda_eq, lambda_ineq = constraint_blocks([0.0; prob.mult_g], n_ceq, n_cineq)
+    return NLPResult(
+        copy(prob.x), prob.obj_val, info, Int(status), ceq, cineq, lambda_eq, lambda_ineq,
+        copy(prob.mult_x_L), copy(prob.mult_x_U), iterations[], fitness.n, :ipopt,
+    )
 end

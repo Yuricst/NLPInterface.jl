@@ -1,6 +1,6 @@
 # TODO
 
-State as of 2026-11-13 (branch `10-intermittent-gc-corruption-in-the-test-suite`).
+State as of 2026-11-13 (branch `12-return-result-struct`).
 
 ## Done
 
@@ -14,23 +14,23 @@ State as of 2026-11-13 (branch `10-intermittent-gc-corruption-in-the-test-suite`
 - End-to-end problem tests (`test/test_problems.jl`) solve only the well-conditioned problems with `:finitediff`, so they pass under every platform's numerics. On failure they print a GitHub Actions `::warning`.
 - Sparse Jacobian support (issue #6, branch `6-support-for-sparse-jacobian`): `jac_sparsity` keyword on both solvers (matrix pattern, `:auto` via SparseConnectivityTracer, or an ADTypes detector), column coloring with SparseMatrixColorings, `detect_jac_sparsity`, docs page `sparse_jac.md`, `benchmark/sparse_jacobian.jl`.
 - Intermittent GC corruption in the test suite (branch `10-intermittent-gc-corruption-in-the-test-suite`): caused by a Julia 1.12 ScopedValues bug (a task that inherited a `with` scope and enters `with` itself corrupts the heap when a GC runs inside it). `solve_snopt` no longer wraps `fitness` in a scope; spawned-task nested solves are caught by a lock-owner deadlock check instead. Investigation, reproducers and acceptance runs in `dev/gc_corruption/` (NOTES.md). The Julia bug is JuliaLang/julia#59483, fixed in Julia 1.12.5 (#60647, #60617); 1.12.0-1.12.4 are affected.
+- `solve_ipopt` and `solve_snopt` return an `NLPResult` (issue #12, branch `12-return-result-struct`): status and raw solver code, constraint values, Lagrange multipliers in one convention for both solvers (checked against known KKT multipliers and the stationarity condition), Ipopt iteration count, `fitness` call count. It destructures and indexes like the former `(xopt, fopt, info)` tuple.
 
 ## Open: before registering in General
 
-1. **Return a result object instead of `(xopt, fopt, info)`.** Adding outputs to the 3-tuple after registering is a breaking change. Add a struct (e.g. `NLPResult`) with `xopt`, `fopt`, `status`, and the values already available but discarded: Lagrange multipliers (SNOPT `xmul`/`Fmul`, Ipopt's multipliers), constraint values at `xopt`, iteration and `fitness` evaluation counts, the raw solver status code. Keep `xopt, fopt, info = solve_...(...)` working by making it iterate as the old tuple.
-2. **Release automation and hygiene.**
+1. **Release automation and hygiene.**
    - Add a TagBot workflow (`.github/workflows/TagBot.yml`), so registered versions get git tags and GitHub releases.
    - Add an Aqua.jl test (ambiguities, stale deps, compat bounds, piracy, unbound type parameters).
    - Decide on the package name: "NLPInterface" is generic and close to the NLPModels.jl ecosystem, which may draw comments during the new-package waiting period.
 
 ## Roadmap (non-breaking, after 0.1)
 
-3. **User-supplied derivatives and other AD backends.** Let `deriv` accept an ADTypes backend (`AutoEnzyme()`, `AutoMooncake()`, ...) through DifferentiationInterface.jl, or a user function returning the Jacobian. ADTypes is already a dependency.
-4. **Exact Hessian for Ipopt.** Ipopt is limited to L-BFGS (`hessian_approximation = "limited-memory"`); e.g. 174 iterations on `rosenbrock_10d` against SNOPT's 68. Offer an optional Hessian of the Lagrangian via ForwardDiff, sparse with the existing coloring machinery.
-5. **Per-iteration user callback** for logging, progress plots, and early stopping (Ipopt's intermediate callback, SNOPT's status), instead of side effects in `fitness`, which also receives Dual and tracer inputs.
-6. **Linear constraints and two-sided constraint bounds.** Pass a known linear part (SNOPT's `A` matrix; Ipopt `jac_c_constant`/`jac_d_constant`) and allow `l <= c(x) <= u` instead of only `ceq == 0`, `cineq <= 0`.
-7. **Central finite differences** (`deriv = :central`): more accurate than the current one-sided steps; SNOPT with one-sided differences struggles at tight tolerances.
-8. **Optimization.jl (SciML) wrapper**, to expose the SNOPT interface through a widely used API.
+2. **User-supplied derivatives and other AD backends.** Let `deriv` accept an ADTypes backend (`AutoEnzyme()`, `AutoMooncake()`, ...) through DifferentiationInterface.jl, or a user function returning the Jacobian. ADTypes is already a dependency.
+3. **Exact Hessian for Ipopt.** Ipopt is limited to L-BFGS (`hessian_approximation = "limited-memory"`); e.g. 174 iterations on `rosenbrock_10d` against SNOPT's 68. Offer an optional Hessian of the Lagrangian via ForwardDiff, sparse with the existing coloring machinery.
+4. **Per-iteration user callback** for logging, progress plots, and early stopping (Ipopt's intermediate callback, SNOPT's status), instead of side effects in `fitness`, which also receives Dual and tracer inputs.
+5. **Linear constraints and two-sided constraint bounds.** Pass a known linear part (SNOPT's `A` matrix; Ipopt `jac_c_constant`/`jac_d_constant`) and allow `l <= c(x) <= u` instead of only `ceq == 0`, `cineq <= 0`.
+6. **Central finite differences** (`deriv = :central`): more accurate than the current one-sided steps; SNOPT with one-sided differences struggles at tight tolerances.
+7. **Optimization.jl (SciML) wrapper**, to expose the SNOPT interface through a widely used API.
 
 ## Known limitations (cannot be removed in this package)
 

@@ -928,6 +928,24 @@ function snopt_store_G!(G, J)
     return G
 end
 
+# `NLPResult` of a SNOPT solve. `r_opt` is the residual [fopt; ceq; cineq] at
+# `xopt` (NaN if unknown); `Fmul`, `xmul` are SNOPT's multipliers.
+function snopt_result(xopt, r_opt, status, n_ceq, n_cineq, Fmul, xmul, n_fitness)
+    ceq, cineq = constraint_blocks(r_opt, n_ceq, n_cineq)
+    # SNOPT's constraint multipliers have the opposite sign of `NLPResult`'s
+    # (checked against the KKT conditions in test/test_result.jl). `xmul` is
+    # the reduced cost of each variable: positive at an active lower bound,
+    # negative at an active upper bound.
+    lambda_eq, lambda_ineq = constraint_blocks(0.0 .- Fmul, n_ceq, n_cineq)   # 0.0 - 0.0 is not -0.0
+    z_lb = max.(xmul, 0.0)
+    z_ub = max.(-xmul, 0.0)
+    info = get(SNOPT_RETURN_STATUS, status, :Unknown)
+    return NLPResult(
+        xopt, r_opt[1], info, status, ceq, cineq, lambda_eq, lambda_ineq, z_lb, z_ub,
+        missing, n_fitness, :snopt,
+    )
+end
+
 """
     solve_snopt(fitness, x0, x_lb, x_ub, n_ceq, n_cineq; kwargs...)
 
@@ -994,14 +1012,19 @@ for another one to finish logs a warning saying so. A task spawned from
 affect the solve. It must not keep a reference to `x`: the array is reused
 between calls (copy it to keep it).
 
-Returns `(xopt, fopt, info)`. `info` is a symbol from
-`NLPInterface.SNOPT_RETURN_STATUS`. `fopt` is the objective of a plain
-(`Float64`) evaluation of `fitness` at `xopt`, so it matches `fitness(xopt)`
-even when SNOPT's last evaluation was at another point (a derivative check) or
-used ForwardDiff Dual numbers; `fitness` is called once more after the solve
-unless its last plain evaluation was at `xopt`. `fopt` is `NaN` if no
-evaluation of `fitness` requested by SNOPT completed, or if `fitness` throws a
-`DomainError` at `xopt`. `:Solve_Succeeded`,
+Returns an [`NLPResult`](@ref): the solution `xopt`, the objective `fopt`, the
+status (a symbol from `NLPInterface.SNOPT_RETURN_STATUS`) and SNOPT's INFO code,
+the constraint values and Lagrange multipliers at `xopt`, and the number of
+`fitness` calls (`iterations` is `missing`: SNOPT's C interface does not report
+it). It destructures like the tuple of earlier versions:
+`xopt, fopt, info = solve_snopt(...)`.
+
+`fopt` and the constraint values come from a plain (`Float64`) evaluation of
+`fitness` at `xopt`, so they match `fitness(xopt)` even when SNOPT's last
+evaluation was at another point (a derivative check) or used ForwardDiff Dual
+numbers; `fitness` is called once more after the solve unless its last plain
+evaluation was at `xopt`. They are `NaN` if no evaluation of `fitness`
+requested by SNOPT completed, or if `fitness` throws a `DomainError` at `xopt`. `:Solve_Succeeded`,
 `:Solved_To_Acceptable_Level`, and `:Feasible_Point_Found` (only with the
 `Feasible point` option) mean SNOPT returned a feasible point.
 `:Elastic_Objective_Minimized` and `:Elastic_Infeasibilities_Minimized` end the
@@ -1023,6 +1046,7 @@ function solve_snopt(
     check_snopt_not_nested()
     check_solver_inputs(x0, x_lb, x_ub, n_ceq, n_cineq, deriv)
     n = length(x0)
+    fitness = CountedFitness(fitness)   # for `NLPResult.n_fitness`
     pattern = resolve_jac_sparsity(jac_sparsity, fitness, x0, n_ceq, n_cineq)
 
     # Always a fresh array: SNOPT writes the solution into `x` in place, and
@@ -1061,10 +1085,11 @@ function solve_snopt(
     # Set once `fitness` has returned a value. Until then `F` holds only the
     # zeros it was initialized with, which must not be reported as `fopt`.
     f_evaluated = Ref(false)
-    # The last point whose residual came from a plain (Float64) call, and its
-    # objective, so the final `fopt` can skip a call when SNOPT ends there.
+    # The last point whose residual came from a plain (Float64) call, and that
+    # residual, so the final `fopt` and constraint values can skip a call when
+    # SNOPT ends there.
     x_plain = fill(NaN, n)
-    f_plain = Ref(NaN)
+    r_plain = fill(NaN, nF)
 
     function usrfun(
         status_::Ptr{Cint},
@@ -1098,7 +1123,7 @@ function solve_snopt(
             # The residual came from a plain call (finite differences evaluate
             # the base point plainly).
             x_plain .= xv
-            f_plain[] = r_buf[1]
+            r_plain .= r_buf
         end
         if needF
             Ff = unsafe_wrap(Array, F_, Int(unsafe_load(neF_)))
@@ -1201,7 +1226,10 @@ function solve_snopt(
                 if meminfo[] != SNOPT_MEMA_OK
                     # `miniw`/`minrw` are not meaningful; report SNOPT's status
                     # (81-84: not enough workspace) without solving.
-                    return copy(x), NaN, get(SNOPT_RETURN_STATUS, Int(meminfo[]), :Unknown)
+                    status = Int(meminfo[])
+                    return snopt_result(
+                        copy(x), fill(NaN, nF), status, n_ceq, n_cineq, Fmul, xmul, fitness.n,
+                    )
                 end
                 if Int(miniw[]) > length(iw)
                     resize!(iw, Int(miniw[]))
@@ -1293,19 +1321,20 @@ function solve_snopt(
                 # is not used: SNOPT may leave it at another point (its derivative
                 # check perturbs `x`), and with ForwardDiff it comes from a Dual
                 # evaluation.
-                fopt = if !f_evaluated[]
-                    NaN
+                # The constraint values come from the same evaluation.
+                r_opt = if !f_evaluated[]
+                    fill(NaN, nF)
                 elseif isequal(x_plain, x)
-                    f_plain[]
+                    copy(r_plain)
                 else
                     try
-                        residual_value!(evaluator, r_buf, x)[1]
+                        copy(residual_value!(evaluator, r_buf, x))
                     catch err
                         is_domain_error(err) || rethrow()
-                        NaN
+                        fill(NaN, nF)
                     end
                 end
-                return copy(x), fopt, info
+                return snopt_result(copy(x), r_opt, status, n_ceq, n_cineq, Fmul, xmul, fitness.n)
             finally
                 _SNOPT_USRFUN[] = nothing
                 _SNOPT_CALLBACK_ERROR[] = nothing

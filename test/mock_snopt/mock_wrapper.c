@@ -208,7 +208,7 @@ void f_snopta(int start, const char *name, int nf, int n, double objadd, int obj
               int iw[], int leniw, double rw[], int lenrw)
 {
     (void)start; (void)name; (void)objadd; (void)iAfun; (void)jAvar; (void)neA; (void)A;
-    (void)flow; (void)fupp; (void)xstate; (void)xmul; (void)fstate; (void)fmul;
+    (void)flow; (void)fupp; (void)xstate; (void)fstate; (void)fmul;
     (void)iw; (void)rw;
     *ns = 0; *ninf = 0; *sinf = 0.0;
     *miniw = mock_miniw(nf, n, neG);
@@ -245,7 +245,14 @@ void f_snopta(int start, const char *name, int nf, int n, double objadd, int obj
             double d = clamp(x[j] - g[j], xlow[j], xupp[j]) - x[j];
             pg = fmax(pg, fabs(d));
         }
-        if (pg < 1e-10) { code = 1; break; }
+        if (pg < 1e-10) {
+            /* Reduced costs, as SNOPT reports them in xmul: for a box-constrained
+               problem the objective gradient (>= 0 at an active lower bound,
+               <= 0 at an active upper bound, ~0 elsewhere). Constraint rows are
+               ignored by this mock, so fmul stays as passed in. */
+            for (int j = 0; j < n; j++) xmul[j] = g[j];
+            code = 1; break;
+        }
         if (iter >= opt_major_iterations_limit) { code = 32; break; }
         iter++;
         /* Shorten the step until the user function is defined at the trial point. */
