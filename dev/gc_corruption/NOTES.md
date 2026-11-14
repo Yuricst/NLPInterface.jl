@@ -253,3 +253,52 @@ A fix is accepted when, in one interleaved batch with K = 10:
 
 The Julia bug itself (`repro/mwe_min.jl`) stays; it is reported upstream
 separately.
+
+## Step 6: fix
+
+### Change (src/snopt.jl)
+
+- `solve_snopt` no longer opens a `ScopedValue` scope. Same-task nesting is
+  detected with task-local storage on every Julia version (what Julia 1.10
+  already did). Tasks spawned from `fitness` inherit nothing, so the Julia bug
+  of step 4 cannot be reached through NLPInterface, whatever those tasks do
+  (another solve, `with_logger`, a library using ScopedValues).
+- The protection the scope gave (a solve from a task spawned in `fitness`
+  throws instead of deadlocking on `SNOPT_LOCK`) is replaced by a deadlock
+  check: the lock records its owner task; a solve that cannot take the lock
+  retries every 10 ms, and if the owner is waiting for the current task
+  (`wait`/`fetch`/`@sync`, directly or through a chain of up to 8 waits, read
+  from `Task.donenotify`'s wait queue) it throws the nested-solve error.
+  Other waits (a worker fed through a `Channel`) still deadlock, with the
+  existing 60 s warning. This now also works on Julia 1.10.
+
+### Tests
+
+- `test_snopt.jl` "nested solve_snopt": the spawned-task case runs on every
+  Julia version; added a two-level `fetch` chain and `@sync`.
+- `mock_snopt/runtests_mock.jl` "tasks spawned from fitness": the regression
+  through the public API (a task spawned from `fitness` enters `with_logger`
+  and runs a full GC after the solve, 30 times). Unfixed: aborts 3/3 (real
+  SNOPT, scratch run); fixed: 3/3 pass. It runs in a subprocess, on CI.
+
+### Acceptance (criteria of step 5)
+
+1. Interleaved batch, K = 10, `acceptance.sh`:
+
+   | reproducer | fixed (working tree) | unfixed (06691a5) |
+   |---|---|---|
+   | `scope_worker` | 0/10 | 10/10 |
+   | `worker_created_in_callback` | 0/10 | 8/10 |
+   | `nested_testset` | 0/10 | 8/10 |
+
+2. The unfixed checkout in the same batch aborts 26/30 (the batch can detect it).
+3. Mechanism: the fix removes the inherited scope, the condition shown
+   necessary and sufficient in step 4; it does not change timing or layout.
+4. Stressed full suite, one batch: d72207d + fix 0/10 aborts, unfixed d72207d
+   4/5, fixed main 5/5 pass. Full suite on Julia 1.12.1 (latest versions)
+   passes; on Julia 1.10.13 with the minimum versions 1040/1041 pass, the one
+   failure being the known platform-dependent `rosenbrock_10d` Ipopt status
+   (it fails the same way without this change).
+
+The Julia bug itself (`repro/mwe_min.jl`) is not fixed by this; it should be
+reported upstream (JuliaLang/julia), with the 7-line reproducer above.

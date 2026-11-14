@@ -80,6 +80,33 @@ const ARGS0 = ([0.0, 0.0], [-5.0, -5.0], [5.0, 5.0], 0, 0)
         @test fopt == 1.0
     end
 
+    @testset "tasks spawned from fitness" begin
+        # Regression (dev/gc_corruption/NOTES.md): solve_snopt used to wrap
+        # fitness in a ScopedValue scope. A task spawned from fitness inherited
+        # it, and on Julia 1.12 entering any `with` in that task with a GC
+        # inside corrupted the heap ("GC error (probable corruption)"), which
+        # aborts this whole process.
+        for _ in 1:30
+            go = Channel{Nothing}(1)
+            worker = Ref{Task}()
+            f = function (x)
+                isassigned(worker) || (worker[] = Threads.@spawn (take!(go);
+                    Base.CoreLogging.with_logger(() -> GC.gc(true), Base.CoreLogging.NullLogger())))
+                return quad(x)
+            end
+            _, _, info = solve_snopt(f, ARGS0...)
+            @test info === :Solve_Succeeded
+            put!(go, nothing)
+            wait(worker[])
+            GC.gc(true)
+        end
+        # A solve from a task that fitness waits for throws instead of deadlocking.
+        f = x -> (fetch(Threads.@spawn solve_snopt(quad, ARGS0...)); quad(x))
+        @test_throws TaskFailedException solve_snopt(f, ARGS0...)
+        # The lock is free again.
+        @test solve_snopt(quad, ARGS0...)[3] === :Solve_Succeeded
+    end
+
     @testset "options" begin
         _, _, info = solve_snopt(quad, ARGS0...; Major_iterations_limit=1)
         @test info === :Maximum_Iterations_Exceeded

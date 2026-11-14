@@ -92,42 +92,30 @@ const _SNOPT_CALLBACK_BACKTRACE = Ref{Any}(nothing)
 # issued when SNOPT cannot recover from it.
 const _SNOPT_LAST_DOMAIN_ERROR = Ref{Any}(nothing)
 
-# Marks code running inside a `solve_snopt`: the solve itself, its `fitness`
-# callbacks and, where ScopedValues exist (Julia >= 1.11), tasks spawned from
-# them. A nested solve from such a task would deadlock on `SNOPT_LOCK` (other
-# task) or overwrite the outer solve's state (same task), so it throws instead.
-# The scoped value is a per-solve flag that is cleared when the solve ends, so a
-# task spawned from `fitness` that outlives the solve may call `solve_snopt`.
-@static if isdefined(Base, :ScopedValues)
-    const _SNOPT_IN_SOLVE = Base.ScopedValues.ScopedValue{Union{Nothing,Base.RefValue{Bool}}}(nothing)
-    function _snopt_in_solve()
-        active = _SNOPT_IN_SOLVE[]
-        return active !== nothing && active[]
-    end
-    function _with_snopt_in_solve(f)
-        active = Ref(true)
-        try
-            return Base.ScopedValues.with(f, _SNOPT_IN_SOLVE => active)
-        finally
-            active[] = false
-        end
-    end
-else
-    # Julia 1.10: task-local only, so tasks spawned from `fitness` are not covered.
-    _snopt_in_solve() = get(task_local_storage(), :NLPInterface_snopt_in_solve, false)::Bool
-    _with_snopt_in_solve(f) = task_local_storage(f, :NLPInterface_snopt_in_solve, true)
-end
+# Marks code running inside a `solve_snopt` on the solving task (the solve and
+# its `fitness` callbacks), so that a nested call from `fitness` throws instead
+# of overwriting the running solve's global state.
+#
+# This is task-local on purpose, not a `ScopedValue`. A `with` scope around the
+# solve would be inherited by every task spawned from `fitness`, and on Julia
+# 1.12 a task that inherited a scope and enters any `with` itself (another
+# `solve_snopt`, `with_logger`, a library using ScopedValues) corrupts the heap
+# when a garbage collection runs inside it (dev/gc_corruption/NOTES.md).
+# Tasks spawned from `fitness` are covered by the deadlock check in
+# `with_snopt_lock` instead.
+_snopt_in_solve() = get(task_local_storage(), :NLPInterface_snopt_in_solve, false)::Bool
+_with_snopt_in_solve(f) = task_local_storage(f, :NLPInterface_snopt_in_solve, true)
+
+nested_snopt_error() = ErrorException(
+    "solve_snopt was called from inside the fitness function of another " *
+    "solve_snopt (or from a task that fitness waits for). SNOPT's C interface " *
+    "keeps global state, so nested solves are not supported; use solve_ipopt " *
+    "for the inner problem, or restructure the problem.",
+)
 
 function check_snopt_not_nested()
     _snopt_in_solve() || return nothing
-    throw(
-        ErrorException(
-            "solve_snopt was called from inside the fitness function of another " *
-            "solve_snopt (or from a task spawned there). SNOPT's C interface keeps " *
-            "global state, so nested solves are not supported; use solve_ipopt for " *
-            "the inner problem, or restructure the problem.",
-        ),
-    )
+    throw(nested_snopt_error())
 end
 
 # What `usrfun` should report to SNOPT when `fitness` throws `err`.
@@ -824,29 +812,81 @@ function snopta_usrfun_trampoline(
     return
 end
 
-# Run `f` holding `SNOPT_LOCK`. If another solve holds it for longer than
-# `SNOPT_LOCK_WAIT_WARN_SECONDS`, warn: a deadlock is likely when the running
-# solve's `fitness` waits for this task (it cannot be detected reliably).
+# The task that holds `SNOPT_LOCK`, so that a solve waiting for the lock can
+# tell whether that task is waiting for it (a certain deadlock).
+const _SNOPT_LOCK_OWNER = Ref{Union{Nothing,Task}}(nothing)
+# How often a solve waiting for `SNOPT_LOCK` retries and re-checks for a deadlock.
+const SNOPT_LOCK_POLL_SECONDS = 0.01
+
+# Tasks blocked in `wait`/`fetch` on `t` (an empty list if `t` has no waiters
+# or the internals differ from what is expected here).
+function _tasks_waiting_on(t::Task)
+    dn = try
+        t.donenotify
+    catch
+        nothing
+    end
+    dn isa Base.GenericCondition || return Task[]
+    waiters = Task[]
+    try
+        lock(dn)
+        try
+            for w in dn.waitq
+                w isa Task && push!(waiters, w)
+            end
+        finally
+            unlock(dn)
+        end
+    catch
+        return Task[]
+    end
+    return waiters
+end
+
+# `true` if `owner` is waiting, directly or through a chain of waits, for `t`
+# to finish: then `t` waiting for `owner` to release the lock never ends.
+function _waits_for(owner::Task, t::Task; depth::Int=8)
+    depth == 0 && return false
+    for w in _tasks_waiting_on(t)
+        (w === owner || _waits_for(owner, w; depth=depth - 1)) && return true
+    end
+    return false
+end
+
+# Run `f` holding `SNOPT_LOCK`. While another solve holds it, retry every
+# `SNOPT_LOCK_POLL_SECONDS`: if the holder is waiting for this task (for example
+# `fetch(Threads.@spawn solve_snopt(...))` inside its `fitness`), throw the
+# nested-solve error instead of deadlocking. Other deadlocks (the holder's
+# `fitness` waits for this task through a Channel, say) cannot be told apart
+# from legitimate concurrent solves; after `SNOPT_LOCK_WAIT_WARN_SECONDS` a
+# warning says so.
 function with_snopt_lock(f)
     if !trylock(SNOPT_LOCK)
-        delay = SNOPT_LOCK_WAIT_WARN_SECONDS[]
-        timer = Timer(delay) do _
-            # Once per session: concurrent long solves wait legitimately.
-            @warn "solve_snopt has waited $(delay) s for another SNOPT solve to " *
-                  "finish. Only one SNOPT solve runs at a time, so this is expected " *
-                  "when several tasks solve concurrently; but if the running solve's " *
-                  "fitness waits for this task (for example a worker pool fed from " *
-                  "fitness), it is a deadlock." maxlog = 1
-        end
-        try
-            lock(SNOPT_LOCK)
-        finally
-            close(timer)
+        me = current_task()
+        start = time()
+        warned = false
+        while true
+            owner = _SNOPT_LOCK_OWNER[]
+            owner !== nothing && owner !== me && _waits_for(owner, me) &&
+                throw(nested_snopt_error())
+            trylock(SNOPT_LOCK) && break
+            if !warned && time() - start >= SNOPT_LOCK_WAIT_WARN_SECONDS[]
+                warned = true
+                # Once per session: concurrent long solves wait legitimately.
+                @warn "solve_snopt has waited $(SNOPT_LOCK_WAIT_WARN_SECONDS[]) s for another " *
+                      "SNOPT solve to finish. Only one SNOPT solve runs at a time, so this " *
+                      "is expected when several tasks solve concurrently; but if the " *
+                      "running solve's fitness waits for this task (for example a worker " *
+                      "pool fed from fitness), it is a deadlock." maxlog = 1
+            end
+            sleep(SNOPT_LOCK_POLL_SECONDS)
         end
     end
+    _SNOPT_LOCK_OWNER[] = current_task()
     try
         return f()
     finally
+        _SNOPT_LOCK_OWNER[] = nothing
         unlock(SNOPT_LOCK)
     end
 end
@@ -942,11 +982,13 @@ warning). Any other exception, including `InterruptException` (Ctrl-C), stops
 SNOPT at once and is rethrown by `solve_snopt`.
 
 Only one SNOPT solve runs at a time. Calling `solve_snopt` from inside
-`fitness` (or, on Julia 1.11 and later, from a task spawned there while the
-solve runs) throws an error, since SNOPT's C interface keeps global state.
-Handing the call to a task that existed before the solve deadlocks; a solve
-that waits more than a minute for another one to finish logs a warning saying
-so.
+`fitness`, or from a task that `fitness` waits for (for example
+`fetch(Threads.@spawn solve_snopt(...))`, also through `@sync` or a chain of
+such waits), throws an error, since SNOPT's C interface keeps global state.
+Handing the call to a task that `fitness` waits for in another way (a worker
+fed through a `Channel`, say) deadlocks; a solve that waits more than a minute
+for another one to finish logs a warning saying so. A task spawned from
+`fitness` that calls `solve_snopt` after the solve has ended is fine.
 
 `fitness` receives a copy of the solver's iterate, so modifying `x` does not
 affect the solve. It must not keep a reference to `x`: the array is reused
