@@ -221,3 +221,35 @@ user spawns from `fitness` inherits that scope. If that task later enters any
 `with` (another `solve_snopt`, `with_logger`, a library using ScopedValues)
 and a GC runs inside it, the heap is corrupted. The test suite does exactly
 this in "nested solve_snopt" (the worker task).
+
+## Step 5: acceptance criteria and baseline
+
+`acceptance.sh LABEL K CHECKOUT...` runs the package-level reproducers
+(`scope_worker`, `worker_created_in_callback`, `nested_testset` from
+`repro/patterns.jl`, N = 150 iterations each) K times against every checkout,
+interleaved round by round in one batch.
+
+Baseline, unfixed main (585573f), K = 10:
+
+| reproducer | aborts |
+|---|---|
+| `scope_worker` | 10/10 |
+| `worker_created_in_callback` | 9/10 |
+| `nested_testset` | 7/10 |
+
+Full-suite stress runs are not evidence on main (0/26 even with the bug, step
+1), so they only serve as a regression check.
+
+A fix is accepted when, in one interleaved batch with K = 10:
+1. the fixed checkout has 0 aborts on all three reproducers (with the bug
+   present, P(0/10) <= 0.3^10 = 6e-6 for the weakest one);
+2. the unfixed checkout (the revert) still aborts, so the batch can detect it;
+3. the mechanism is explained: the fix removes the condition shown in step 4
+   (a scope that tasks spawned from `fitness` inherit), rather than changing
+   timing or heap layout;
+4. the full test suite passes with the latest and the minimum dependency
+   versions, and the stressed suite on d72207d + fix shows 0 aborts in 10 runs
+   (baseline there: 19/28).
+
+The Julia bug itself (`repro/mwe_min.jl`) stays; it is reported upstream
+separately.
