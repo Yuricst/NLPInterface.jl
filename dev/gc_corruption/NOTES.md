@@ -124,3 +124,35 @@ Reading:
   thread 1 is inside SNOPT's callback) and line 322 (a worker task that runs a
   whole SNOPT solve on thread 2 after the outer solve). These are the
   suspects for step 3.
+
+## Step 3: targeted reduction with stand-alone patterns
+
+`repro/patterns.jl VARIANT N` loops one usage pattern from `test_snopt.jl`
+with a full GC after every iteration; `repro/run_patterns.sh` runs variants
+K times in parallel (`VARIANTS`, `SCRIPT` select what to run).
+
+First pass (K = 4, N = 300, on main and on d72207d): no aborts at all for
+`plain`, `spawn_outside`, `spawn_in_callback_trivial`,
+`spawn_in_callback_nested`, `worker_solve` and `spawn_in_callback_ipopt`
+(0/24 on each commit). None of the spawn sites on its own damages the heap, so
+the trigger needs more of the "nested solve_snopt" testset (step 4).
+
+Later variants (K = 6, N = 150, d72207d unless noted):
+
+| variant | aborts |
+|---|---|
+| `nested_same_task` (fitness calls solve_snopt itself; it throws) | 0/6 |
+| `worker_created_in_callback` (fitness spawns a task that solves after the outer solve) | 6/6, then 5/6 |
+| `wcic_noop` (same task creation, later only allocates) | 0/6 |
+| `wcic_ipopt` (same, later solves with Ipopt) | 0/6 |
+| `wcic_from_ipopt` (task created in an Ipopt callback, later solves with SNOPT) | 0/6 |
+| `scope_worker` (task created inside `_with_snopt_in_solve`, no callback, later solves with SNOPT) | 6/6; main: 6/6 |
+| `scope_worker_with` (same, later `_with_snopt_in_solve` + allocation) | 0/6 |
+| `scope_worker_ipopt` (same, later Ipopt inside `_with_snopt_in_solve`) | 6/6 |
+| `scope_worker`, `--threads=1,0` | 0/6 |
+
+So the callback is not needed and SNOPT is not needed: a task created inside
+NLPInterface's `ScopedValue` scope (`_with_snopt_in_solve`), which later
+enters such a scope again and runs a solve, is enough. It reproduces on main
+too (6/6), so the bug is still present there; the full suite on main only
+misses the detection window.
