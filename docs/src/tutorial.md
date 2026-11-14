@@ -141,12 +141,21 @@ xopt, fopt, info = solve_ipopt(
 
 ## Checking the result
 
+Both solvers return an [`NLPResult`](@ref). Destructuring it, as above, gives the solution, the objective and the status. The whole result also holds the constraint values and Lagrange multipliers at the solution, and the cost of the solve:
+
 ```julia
-obj, ceq, cineq = fitness(xopt)
+res = solve_ipopt(fitness, x0, x_lb, x_ub, n_ceq, n_cineq; print_level = 0)
+res.status        # :Solve_Succeeded
+res.ceq, res.cineq                 # constraint values at res.xopt
+res.lambda_eq, res.lambda_ineq     # their Lagrange multipliers
+res.z_lb, res.z_ub                 # multipliers of the bounds on x
+res.iterations, res.n_fitness      # Ipopt iterations, calls of fitness
 ```
 
-A successful solve has `info` equal to `:Solve_Succeeded` or `:Solved_To_Acceptable_Level`, `ceq` near zero, and `cineq` entrywise at most zero. Other symbols report failure modes such as `:Infeasible_Problem_Detected` or `:Maximum_Iterations_Exceeded`. The full code maps are `NLPInterface.IPOPT_RETURN_STATUS` and `NLPInterface.SNOPT_RETURN_STATUS`.
+Both solvers report the multipliers in one convention: at a KKT point ``\nabla f + J_{\mathrm{eq}}^\top \lambda_{\mathrm{eq}} + J_{\mathrm{ineq}}^\top \lambda_{\mathrm{ineq}} - z_{\mathrm{lb}} + z_{\mathrm{ub}} = 0``, with ``\lambda_{\mathrm{ineq}}``, ``z_{\mathrm{lb}}`` and ``z_{\mathrm{ub}}`` nonnegative and zero where their constraint or bound is inactive. A multiplier is the sensitivity of the optimal objective to its constraint: here `res.lambda_ineq[1] ≈ 0` because the inequality is inactive at the solution.
+
+A successful solve has `info` (`res.status`) equal to `:Solve_Succeeded` or `:Solved_To_Acceptable_Level`, `ceq` near zero, and `cineq` entrywise at most zero. Other symbols report failure modes such as `:Infeasible_Problem_Detected` or `:Maximum_Iterations_Exceeded`. The full code maps are `NLPInterface.IPOPT_RETURN_STATUS` and `NLPInterface.SNOPT_RETURN_STATUS`.
 
 For SNOPT, `:Solved_To_Acceptable_Level` is INFO 3: the point is feasible, but optimality is only within a factor of 100 of `Major_optimality_tolerance`. `:Feasible_Point_Found` (INFO 2) appears only with the `Feasible point` option. SNOPT INFO 5 and 6 are reported as `:Elastic_Objective_Minimized` and `:Elastic_Infeasibilities_Minimized`. The SNOPT 7.7 manual lists them as normal endings of elastic mode, in which elastic constraints are allowed to violate their bounds, and does not promise the constraints hold. Evaluate `fitness(xopt)` and check `ceq` and `cineq` before using the point. Earlier versions reported these codes (and INFO 4, which `snOptA` is not expected to return) as `:Solved_To_Acceptable_Level`.
 
-Checking the constraints yourself is good practice for any status. Neither solver's status replaces looking at `ceq` and `cineq` at `xopt`.
+Checking the constraints yourself is good practice for any status. Neither solver's status replaces looking at `res.ceq` and `res.cineq` (or `fitness(xopt)`).

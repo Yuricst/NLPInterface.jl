@@ -213,6 +213,21 @@ xopt, fopt, info = NLPInterface.solve_snopt(
 )
 ```
 
+## Result
+
+Both solvers return an `NLPResult`. It destructures like the `(xopt, fopt, info)` tuple of earlier versions, and also holds the constraint values and Lagrange multipliers at the solution:
+
+```julia
+res = solve_ipopt(fitness, x0, x_lb, x_ub, n_ceq, n_cineq; print_level=0)
+res.status                       # :Solve_Succeeded
+res.ceq, res.cineq               # constraint values at res.xopt
+res.lambda_eq, res.lambda_ineq   # their multipliers
+res.z_lb, res.z_ub               # multipliers of the bounds on x
+res.iterations, res.n_fitness    # Ipopt iterations (missing for SNOPT), calls of fitness
+```
+
+Both solvers use one sign convention: at a KKT point, `∇f + J_eqᵀ λ_eq + J_ineqᵀ λ_ineq - z_lb + z_ub = 0`, with `λ_ineq`, `z_lb`, `z_ub` nonnegative.
+
 ## Sparse Jacobian
 
 By default both solvers use a dense Jacobian of `[obj; ceq; cineq]`. For large problems where each constraint depends on few variables (collocation, multiple shooting, ...), pass its sparsity pattern with `jac_sparsity`. This cuts the `fitness` calls per Jacobian (columns that share no row are differentiated together), the memory, and the solvers' linear algebra:
