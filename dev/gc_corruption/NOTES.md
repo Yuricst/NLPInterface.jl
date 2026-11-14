@@ -302,3 +302,29 @@ separately.
 
 The Julia bug itself (`repro/mwe_min.jl`) is not fixed by this; it should be
 reported upstream (JuliaLang/julia), with the 7-line reproducer above.
+
+## Upstream status (checked 2026-11-13)
+
+Already known and fixed in Julia:
+
+- JuliaLang/julia#59483 "GC error on Julia 1.12" (label `regression 1.12`):
+  the corrupted child is the `scope` field of `Core.Task`. The explanation in
+  JuliaLang/julia#60620 matches step 4: a task can inherit a scope from the
+  task that spawned it; when the parent leaves that scope, nothing roots it
+  any more, and the child task's later scope changes let the GC free it.
+- Fixed by JuliaLang/julia#60647 ("Preserve the scope across the exception
+  handler") and JuliaLang/julia#60617 ("add wb_back on all task switch
+  paths"), merged 2026-01-14/15, backported in "Backports for 1.12.5"
+  (JuliaLang/julia#60612). Julia 1.12.5 was released 2026-02-10.
+
+Verified here with the official Julia 1.12.7 binary:
+
+| check | Julia 1.12.1 | Julia 1.12.7 |
+|---|---|---|
+| `repro/mwe_min.jl` | 3/3 abort | 0/6 abort |
+| public-API regression script on unfixed NLPInterface (c3d3974) | 2/2 abort | 0/4 abort |
+
+So Julia 1.12.0 to 1.12.4 are affected; 1.12.5 and later are not. The change
+in step 6 still matters for users on 1.12.0-1.12.4 (1.12.1 and 1.12.3 are
+what this machine has), and it costs nothing on fixed versions. No new
+upstream report is needed.
