@@ -92,3 +92,35 @@ only reached by a later full GC. Which code holds the stale reference is not
 visible from the abort (the parent is optimized out in the release build); the
 control matrix (step 2) narrows the suspects, and the watchpoint (step 3)
 finds the cell's history.
+
+## Step 2: control matrix
+
+`matrix.sh BASE_WORKTREE ENV110 K`: the reproducer (d72207d) with one factor
+changed per cell, K = 8 runs per cell, two cells at a time.
+`runners/subset.jl` runs a chosen subset of the test files (`NLPI_FILES`).
+
+| cell | change from the reproducer | GC error | segfault | pass |
+|---|---|---|---|---|
+| A | none (Julia 1.12.1, real SNOPT, default threads) | 6 | 1 | 1 |
+| B | SNOPT library not loaded (`SNOPT_LIB=`) | 0 | 0 | 8 |
+| C | `--threads=1,0` (no worker thread) | 0 | 0 | 8 |
+| D | Julia 1.12.3 | 7 | 0 | 1 |
+| E | Julia 1.10.13 | 0 | 0 | 8 |
+| F | without `test_snopt.jl` | 0 | 0 | 8 |
+| G | without `test_problems.jl` and `test_ipopt.jl` (Ipopt) | 7 | 0 | 1 |
+
+Reading:
+- The corruption needs both the in-process SNOPT tests (B, F) and a second OS
+  thread (C). Removing either one removes it, 0/8 against 7/8.
+- Ipopt is not involved (G still fails; the abort only moves earlier, to GC #66,
+  since less was allocated before).
+- Not fixed in Julia 1.12.3 (D). Julia 1.10 (E) passes, but it is confounded:
+  it has no interactive thread (so `Threads.@spawn` runs on the main thread,
+  like C), and the `ScopedValue`-only nested-solve tests are skipped there.
+- On Julia 1.12 the main task runs on thread 1 (interactive pool) and
+  `Threads.@spawn` runs on thread 2. `test_snopt.jl` spawns at three places:
+  line 8 (`wait(Threads.@spawn throw(e))`, outside any solve), line 311
+  (`fetch(Threads.@spawn solve_snopt(...))` inside `fitness`, i.e. while
+  thread 1 is inside SNOPT's callback) and line 322 (a worker task that runs a
+  whole SNOPT solve on thread 2 after the outer solve). These are the
+  suspects for step 3.
